@@ -284,9 +284,9 @@ These are real issues from building the tool. Keep them in mind before "simplify
     docker-backed run used the wrapper baked in at build time — wrapper fixes silently
     didn't apply until the image was rebuilt (a real "why no nested plots?" trap). Fix: the
     docker backend now runs the wrapper from `/work/_runner/…` on the shared volume, synced
-    each run (`engine._sync_runners`); the image's `/app` copy is just a fallback. (The app
-    image `fskx-runner` is itself rebuilt every `run.sh` launch, so engine/template/wrapper
-    changes land on restart; only per-model images are cached.)
+    each run (`engine._sync_runners`); the image's `/app` copy is just a fallback. The app
+    image is itself rebuilt every `run.sh` launch, so engine/template/wrapper
+    changes land on restart; only per-model images are cached.
 
 ## 5. Known limitations & future pitfalls
 
@@ -373,7 +373,7 @@ These are real issues from building the tool. Keep them in mind before "simplify
 - **Launcher config (`.env`).** `.env` next to `run.sh` is the single host-side config file,
   loaded by the launcher. Inside the container `FSKX_MODELS_DIR=/models` is fixed (the mount
   point); the configurable thing is the **host** folder mounted there, set via `MODELS_DIR`
-  (CLI arg > `.env` > default `fskx-runner/fskx_models`, created if missing). `PORT`,
+  (CLI arg > `.env` > default `fskx_models/` in this directory, created if missing). `PORT`,
   `ANTHROPIC_API_KEY`/`API_KEY` and `FSKX_CLAUDE_MODEL` are resolved the same way and passed
   in with `-e`. The default models folder changed from the script's parent to the dedicated
   `fskx_models/` (git/Docker-ignored).

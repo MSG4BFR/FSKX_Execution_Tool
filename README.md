@@ -10,9 +10,9 @@ back. No coding required.
    Download it from https://www.docker.com/products/docker-desktop/ . After installing,
    start it once and wait until the whale icon says Docker is running.
 
-2. **The `fskx-runner` folder** (this folder).
+2. **This folder** (the FSKX Execution Tool).
    By default the tool serves — and saves repository downloads into — a dedicated
-   **`fskx_models`** folder inside `fskx-runner` (created automatically). Put your own
+   **`fskx_models`** folder inside this directory (created automatically). Put your own
    `.fskx` files there, or point the tool at any folder (see below).
 
 3. **An internet connection** the first time you run each model (to download its software)
@@ -26,7 +26,6 @@ That's it for normal use. A Claude API key is only needed for the optional
 **macOS / Linux**
 
 ```bash
-cd fskx-runner
 ./run.sh
 ```
 
@@ -89,7 +88,7 @@ tries a corrected version.
 
 ## Where your files live
 
-- **Models:** the `fskx_models` folder inside `fskx-runner` by default (or whatever
+- **Models:** the `fskx_models` folder inside this directory by default (or whatever
   `MODELS_DIR` points to) — read-write, so repository downloads land here.
 - **Results:** kept inside the tool between runs and offered as downloads on the result
   page. Save anything you want to keep to your own location — they're deleted when you
