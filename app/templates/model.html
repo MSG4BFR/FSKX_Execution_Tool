@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ info.name }} — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('index') }}">← All models</a>
+    <header class="top"><h1>{{ info.name }}</h1></header>
+    <div class="badges" style="margin-bottom:14px">
+      <span class="badge lang-{{ info.language }}">{{ info.language|upper }}{% if info.version %} {{ info.version }}{% endif %}</span>
+      {% if info.hazard %}<span class="badge">{{ info.hazard }}</span>{% endif %}
+      {% if info.product %}<span class="badge">{{ info.product }}</span>{% endif %}
+    </div>
+    {% if info.description %}<p class="desc">{{ info.description }}</p>{% endif %}
+
+    {% if info.error %}
+      <div class="card"><p class="err">⚠ This archive can’t be run</p>
+      <p class="note">{{ info.error }}</p></div>
+    {% else %}
+    <form method="post" action="{{ url_for('run') }}">
+      <input type="hidden" name="fskx" value="{{ info.fskx }}">
+
+      {% if info.scenarios|length > 1 %}
+      <div class="field">
+        <label>Scenario</label>
+        <div class="meta">Pick a starting parameter set. Changing it reloads the defaults below.</div>
+        <select name="scenario" onchange="location.href='{{ url_for('model', fskx=info.fskx) }}?scenario='+encodeURIComponent(this.value)">
+          {% for s in info.scenarios %}
+            <option value="{{ s }}" {% if s == info.selected_scenario %}selected{% endif %}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% else %}
+        <input type="hidden" name="scenario" value="{{ info.selected_scenario or '' }}">
+      {% endif %}
+
+      <fieldset>
+        <legend>Input parameters</legend>
+        {% if not inputs %}<p class="note">This model exposes no input parameters.</p>{% endif %}
+        {% for f in inputs %}
+          {% include "_field.html" %}
+        {% endfor %}
+      </fieldset>
+
+      {% if consts %}
+      <fieldset>
+        <legend>Constants (advanced — usually left unchanged)</legend>
+        {% for f in consts %}
+          {% include "_field.html" %}
+        {% endfor %}
+      </fieldset>
+      {% endif %}
+
+      <button class="btn" type="submit">Run model</button>
+    </form>
+    {% endif %}
+
+    <div class="card" style="margin-top:22px">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <div>
+          <strong>Complex dependencies?</strong>
+          <div class="note">If this model needs system software (JAGS, Stan, OpenBUGS,
+          GDAL…) the standard build may not cover it. Build a tailored environment with AI.</div>
+        </div>
+        <a class="btn secondary" href="{{ url_for('ai_page', fskx=info.fskx) }}">AI environment</a>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <div class="row" style="justify-content:space-between; align-items:center">
+        <div>
+          <strong>Reset environment</strong>
+          <div class="note">Delete this model’s cached environment, AI Docker image and
+          stored run results to reclaim disk. The model file stays; it rebuilds on the next run.</div>
+        </div>
+        <form method="post" action="{{ url_for('cleanup_model_route') }}"
+              onsubmit="return confirm('Remove this model’s cached environment, image and stored run results? The environment rebuilds on the next run.')">
+          <input type="hidden" name="fskx" value="{{ info.fskx }}">
+          <button class="btn secondary" type="submit">Remove environment</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

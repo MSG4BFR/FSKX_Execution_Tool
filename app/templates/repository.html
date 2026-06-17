@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Repository — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('index') }}">← All models</a>
+    <header class="top"><h1>Online repository</h1></header>
+    <p class="sub">Models from the RAKIP / FSKX public repository. Download one to add it
+    to your models folder.</p>
+
+    <div class="field">
+      <input type="text" id="filter" placeholder="Filter by name…" spellcheck="false"
+             onkeyup="filterList()">
+    </div>
+
+    {% if error %}
+      <div class="card"><p class="err">Could not reach the repository: {{ error }}</p>
+      <p class="note">Check your internet connection and try again.</p></div>
+    {% endif %}
+
+    <div id="list">
+      {% for m in models %}
+        <div class="card repo-row" data-name="{{ m.name|lower }}">
+          <div class="row" style="justify-content:space-between; align-items:flex-start">
+            <div>
+              <h3 style="margin-bottom:2px">{{ m.name }}</h3>
+              <div class="note">{{ m.repository_name }} · {{ m.upload_date[:10] }}</div>
+            </div>
+            <div>
+              {% if m.downloaded %}
+                <span class="badge ok">✓ downloaded</span>
+              {% else %}
+                <form method="post" action="{{ url_for('repository_download') }}">
+                  <input type="hidden" name="id" value="{{ m.id }}">
+                  <input type="hidden" name="name" value="{{ m.name }}">
+                  <button class="btn" type="submit">Download</button>
+                </form>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+  <script>
+    function filterList() {
+      const q = document.getElementById("filter").value.toLowerCase();
+      document.querySelectorAll(".repo-row").forEach(r => {
+        r.style.display = r.dataset.name.includes(q) ? "" : "none";
+      });
+    }
+  </script>
+</body>
+</html>

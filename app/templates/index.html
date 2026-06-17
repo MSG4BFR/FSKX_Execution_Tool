@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <header class="top">
+      <h1>FSKX Runner</h1>
+      <nav class="nav">
+        <a href="{{ url_for('index') }}">⟳ Rescan</a>
+        <form method="post" action="{{ url_for('cleanup_all_route') }}" class="nav-form"
+              onsubmit="return confirm('Remove ALL cached environments, AI images and stored run results? Each model will rebuild on its next run. Model files (.fskx) are kept.')">
+          <button type="submit" class="linkbtn">🧹 Clean all caches</button>
+        </form>
+        <a href="{{ url_for('settings') }}">⚙ Settings{% if not api_key_set %} <span class="dot"></span>{% endif %}</a>
+      </nav>
+    </header>
+    <p class="sub">All models — local and from the online repository ({{ n_downloaded }} downloaded · {{ n_total }} total).
+      Click a downloaded model to set parameters and run it; click one that isn’t downloaded yet to fetch it first.</p>
+
+    {% if remote_error %}
+      <div class="card"><p class="err">Could not reach the online repository: {{ remote_error }}</p>
+      <p class="note">Showing local models only. Check your connection and Rescan.</p></div>
+    {% endif %}
+
+    <div class="field">
+      <input type="text" id="filter" placeholder="Filter by name…" spellcheck="false" onkeyup="filterList()">
+    </div>
+
+    {% if not models %}
+      <div class="card"><p class="note">No models found. Drop <code>.fskx</code> files into the folder
+      mounted as <code>/models</code>, or connect to the online repository, then Rescan.</p></div>
+    {% endif %}
+
+    <div id="list">
+    {% for m in models %}
+      {% if m.downloaded %}
+        <a class="card model-row" data-name="{{ m.name|lower }}" href="{{ url_for('model', fskx=m.fskx) }}">
+          <h3>{{ m.name }}</h3>
+          <div class="note">{{ m.fskx }}</div>
+          <div class="badges">
+            {% if m.language and m.language != '?' %}
+              <span class="badge lang-{{ m.language }}">{{ m.language|upper }}{% if m.version %} {{ m.version }}{% endif %}</span>
+            {% endif %}
+            {% if m.hazard %}<span class="badge">{{ m.hazard }}</span>{% endif %}
+            {% if m.product %}<span class="badge">{{ m.product }}</span>{% endif %}
+            {% if m.n_params %}<span class="badge">{{ m.n_params }} parameters</span>{% endif %}
+            {% if m.error %}<span class="badge err">unreadable</span>{% endif %}
+          </div>
+          <div class="badges status">
+            <span class="badge on" title="Available in your models folder">✓ downloaded</span>
+            <span class="badge {{ 'on' if m.prepared else 'off' }}"
+                  title="Whether an execution environment (micromamba env or Docker image) built successfully">
+              {{ '✓' if m.prepared else '○' }} runnable</span>
+            <span class="badge {{ 'on' if m.executed else 'off' }}"
+                  title="Whether the model has completed a run successfully at least once">
+              {{ '✓' if m.executed else '○' }} executed</span>
+          </div>
+        </a>
+      {% else %}
+        <form class="card model-row repo-form" data-name="{{ m.name|lower }}"
+              method="post" action="{{ url_for('repository_download') }}"
+              onclick="this.submit()" title="Download this model from the repository">
+          <input type="hidden" name="id" value="{{ m.id }}">
+          <input type="hidden" name="name" value="{{ m.name }}">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:14px">
+            <div>
+              <h3>{{ m.name }}</h3>
+              <div class="note">{{ m.repository_name }}{% if m.upload_date %} · {{ m.upload_date }}{% endif %}</div>
+              <div class="badges status">
+                <span class="badge off">○ not downloaded</span>
+              </div>
+            </div>
+            <button class="btn" type="submit" onclick="event.stopPropagation()">Download</button>
+          </div>
+        </form>
+      {% endif %}
+    {% endfor %}
+    </div>
+  </div>
+  <script>
+    function filterList() {
+      const q = document.getElementById("filter").value.toLowerCase();
+      document.querySelectorAll(".model-row").forEach(r => {
+        r.style.display = r.dataset.name.includes(q) ? "" : "none";
+      });
+    }
+  </script>
+</body>
+</html>

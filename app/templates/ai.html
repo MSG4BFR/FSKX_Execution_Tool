@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI environment — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('model', fskx=fskx) }}">← Back to model</a>
+    <header class="top"><h1>AI-assisted environment</h1></header>
+    <p class="sub">{{ name }} · {{ language|upper }}</p>
+
+    <p class="desc">For models that need system software (JAGS, Stan, OpenBUGS, GDAL,
+    compilers…), Claude writes a tailored Dockerfile and a per-model image is built and
+    used to run the model.</p>
+
+    {% if not docker %}
+      <div class="card"><p class="err">The Docker backend isn't reachable from the app,
+      so a per-model image can't be built. Start the app with the provided launcher
+      (it mounts the Docker socket).</p></div>
+    {% endif %}
+    {% if not api_key_set %}
+      <div class="card"><p class="warn">No Claude API key set.</p>
+      <p class="note">Add one under <a href="{{ url_for('settings') }}">Settings</a> to
+      generate a Dockerfile.</p></div>
+    {% endif %}
+
+    <div class="row" style="gap:10px; margin:14px 0">
+      <button class="btn" id="genBtn" {% if not api_key_set or not docker %}disabled{% endif %}>
+        Generate Dockerfile with AI
+      </button>
+      {% if has_error %}<span class="note">Will use the last failure log to guide the fix.</span>{% endif %}
+    </div>
+
+    <div id="genStatus" class="statusline" style="display:none">
+      <span class="spinner"></span> <span id="genMsg"></span>
+    </div>
+
+    <div id="review" style="display:none">
+      <div class="field">
+        <label>Generated Dockerfile (you can edit it before building)</label>
+        <textarea id="dockerfile" class="code" rows="20" spellcheck="false"></textarea>
+      </div>
+      <button class="btn" id="buildBtn">Build image &amp; use it</button>
+    </div>
+
+    <div id="buildStatus" class="statusline" style="display:none">
+      <span class="spinner"></span> <span id="buildMsg"></span>
+    </div>
+
+    <div id="buildDone" style="display:none">
+      <p id="buildResult" class="statusline"></p>
+      <details style="margin-top:10px"><summary class="note">Build log</summary>
+        <pre class="log" id="buildLog"></pre></details>
+      <p style="margin-top:16px"><a class="btn" href="{{ url_for('model', fskx=fskx) }}">Run the model</a></p>
+    </div>
+  </div>
+
+  <script>
+    const fskx = "{{ fskx }}";
+
+    async function pollJob(jobId, onUpdate) {
+      const d = await (await fetch("/api/status/" + jobId)).json();
+      onUpdate(d);
+      if (d.state === "running") setTimeout(() => pollJob(jobId, onUpdate), 1500);
+    }
+
+    document.getElementById("genBtn").addEventListener("click", async () => {
+      document.getElementById("genStatus").style.display = "block";
+      document.getElementById("review").style.display = "none";
+      const fd = new FormData(); fd.append("fskx", fskx);
+      const resp = await fetch("/api/ai/generate", { method: "POST", body: fd });
+      if (!resp.ok) {
+        const e = await resp.json();
+        document.getElementById("genMsg").textContent = e.error || "Failed";
+        return;
+      }
+      const { job_id } = await resp.json();
+      pollJob(job_id, d => {
+        document.getElementById("genMsg").textContent = d.message || "Working…";
+        if (d.state === "done") {
+          document.getElementById("genStatus").style.display = "none";
+          document.getElementById("dockerfile").value = d.dockerfile || "";
+          document.getElementById("review").style.display = "block";
+        } else if (d.state === "error") {
+          document.getElementById("genMsg").innerHTML =
+            '<span class="err">' + (d.message || "Failed") + '</span>';
+        }
+      });
+    });
+
+    document.getElementById("buildBtn").addEventListener("click", async () => {
+      document.getElementById("buildStatus").style.display = "block";
+      document.getElementById("buildDone").style.display = "none";
+      const fd = new FormData();
+      fd.append("fskx", fskx);
+      fd.append("dockerfile", document.getElementById("dockerfile").value);
+      const { job_id } = await (await fetch("/api/ai/build", { method: "POST", body: fd })).json();
+      pollJob(job_id, d => {
+        document.getElementById("buildMsg").textContent = d.message || "Building…";
+        if (d.state !== "running") {
+          document.getElementById("buildStatus").style.display = "none";
+          document.getElementById("buildDone").style.display = "block";
+          document.getElementById("buildResult").innerHTML = d.state === "done"
+            ? '<span class="ok">✓ ' + d.message + '</span>'
+            : '<span class="err">✗ ' + (d.message || "Build failed") + '</span>';
+          document.getElementById("buildLog").textContent = d.build_log || d.error || "";
+        }
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<div class="field">
+  <label for="param__{{ f.id }}">
+    {{ f.label }}
+    {% if f.unit %}<span class="unit">[{{ f.unit }}]</span>{% endif %}
+  </label>
+  {% if f.description or f.minValue or f.maxValue %}
+  <div class="meta">
+    {{ f.description }}
+    {% if f.minValue and f.minValue not in ['-', None] %} · min {{ f.minValue }}{% endif %}
+    {% if f.maxValue and f.maxValue not in ['-', None] %} · max {{ f.maxValue }}{% endif %}
+    <span class="note">· id: <code>{{ f.id }}</code></span>
+  </div>
+  {% endif %}
+  <input type="text" id="param__{{ f.id }}" name="param__{{ f.id }}"
+         value="{{ f.display }}" spellcheck="false">
+</div>

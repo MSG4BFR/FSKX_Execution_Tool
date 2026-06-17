@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Running — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('index') }}">← All models</a>
+    <header class="top"><h1>Run</h1></header>
+    <div class="note">{{ job.fskx }}</div>
+
+    <div id="running" class="statusline">
+      <span class="spinner"></span>
+      <span id="msg">Starting…</span>
+    </div>
+
+    <div id="results" style="display:none">
+      <div id="summary" class="statusline"></div>
+      <div id="warnings"></div>
+      <div id="aifix" style="display:none" class="card">
+        <strong>Environment problem</strong>
+        <div class="note">The standard environment couldn't run this model. Claude can
+        build a tailored Docker environment for it (system libraries and all).</div>
+        <p style="margin-top:10px">
+          <a class="btn" id="aifixBtn" href="#">Fix with AI</a>
+          <span id="aifixHint" class="note"></span>
+        </p>
+      </div>
+      <div id="plots"></div>
+      <div id="files" class="filelist"></div>
+      <details style="margin-top:18px">
+        <summary class="note">Execution log</summary>
+        <pre class="log" id="log"></pre>
+      </details>
+      <p style="margin-top:20px"><a class="btn secondary" href="{{ url_for('model', fskx=job.fskx) }}">Run again with new parameters</a></p>
+    </div>
+  </div>
+
+  <script>
+    const jobId = "{{ job_id }}";
+    const base = "{{ url_for('index') }}";
+    // Build a result URL, encoding each path segment but keeping the subfolder slashes.
+    const fileUrl = name => "/result/" + jobId + "/file/" +
+      name.split("/").map(encodeURIComponent).join("/");
+    async function poll() {
+      const r = await fetch("/api/status/" + jobId);
+      const d = await r.json();
+      document.getElementById("msg").textContent = d.message || "Working…";
+      if (d.state === "running") { setTimeout(poll, 1500); return; }
+      // finished
+      document.getElementById("running").style.display = "none";
+      const res = document.getElementById("results");
+      res.style.display = "block";
+      const summary = document.getElementById("summary");
+      if (d.ok) summary.innerHTML = '<span class="ok">✓ Model finished successfully.</span>';
+      else summary.innerHTML = '<span class="err">✗ The model did not complete. See the log below.</span>';
+
+      if (d.warnings && d.warnings.length) {
+        document.getElementById("warnings").innerHTML =
+          '<p class="warn">⚠ ' + d.warnings.length +
+          ' warning(s) during visualization — a partial plot may still be shown.</p>';
+      }
+      if (!d.ok && d.can_ai_fix) {
+        const box = document.getElementById("aifix");
+        box.style.display = "block";
+        document.getElementById("aifixBtn").href = "/ai/" + encodeURIComponent(d.fskx || "{{ job.fskx }}");
+        {% if not api_key_set %}
+        document.getElementById("aifixHint").textContent = "— set your Claude API key in Settings first.";
+        {% endif %}
+      }
+      const plots = document.getElementById("plots");
+      if ((d.plots || []).length > 1) {
+        plots.innerHTML = "<p class='note'>" + d.plots.length + " plots generated:</p>";
+      }
+      (d.plots || []).forEach(p => {
+        const url = fileUrl(p);
+        const fig = document.createElement("figure");
+        fig.className = "plot-wrap";
+        let el;
+        if (p.toLowerCase().endsWith(".pdf")) {
+          el = document.createElement("embed");
+          el.type = "application/pdf";
+          el.className = "plot plot-pdf";
+        } else {
+          el = document.createElement("img");
+          el.className = "plot";
+        }
+        el.src = url;
+        const cap = document.createElement("figcaption");
+        cap.className = "note";
+        cap.innerHTML = '<a href="' + url + '" download>' + p + ' ↓</a>';
+        fig.appendChild(el);
+        fig.appendChild(cap);
+        plots.appendChild(fig);
+      });
+      const files = document.getElementById("files");
+      if ((d.files || []).length) {
+        files.innerHTML = "<p class='note'>Download results:</p>";
+        d.files.forEach(f => {
+          const a = document.createElement("a");
+          a.href = fileUrl(f);
+          a.textContent = f;
+          files.appendChild(a);
+        });
+      }
+      document.getElementById("log").textContent = (d.log || "") + (d.error ? "\n\n" + d.error : "");
+    }
+    poll();
+  </script>
+</body>
+</html>

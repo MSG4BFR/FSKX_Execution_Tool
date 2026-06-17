@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Settings — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('index') }}">← All models</a>
+    <header class="top"><h1>Settings</h1></header>
+    <p class="sub">Used only for the AI-assisted environment builder. A key entered here is
+    kept in memory for this session only. To avoid re-entering it each launch, put it in a
+    <code>.env</code> file next to <code>run.sh</code> (<code>ANTHROPIC_API_KEY=sk-ant-…</code>)
+    — see <code>.env.example</code>; the launcher loads it automatically.</p>
+
+    {% if saved %}<div class="card"><span class="ok">✓ Saved.</span></div>{% endif %}
+
+    <form method="post">
+      <fieldset>
+        <legend>Claude API</legend>
+        <div class="field">
+          <label for="api_key">Anthropic API key</label>
+          <div class="meta">Starts with <code>sk-ant-</code>. Get one at console.anthropic.com.</div>
+          <input type="password" id="api_key" name="api_key"
+                 value="{{ settings.api_key }}" placeholder="sk-ant-…" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="model_id">Model</label>
+          <div class="meta">A Claude model your key can access. Default: claude-sonnet-4-6.</div>
+          <input type="text" id="model_id" name="model_id"
+                 value="{{ settings.model_id }}" spellcheck="false">
+        </div>
+        <button class="btn" type="submit">Save</button>
+      </fieldset>
+    </form>
+
+    <div class="card">
+      <div class="note">Docker backend (needed for AI-built environments):
+        {% if docker %}<span class="ok">available</span>
+        {% else %}<span class="err">not reachable</span> — start the launcher with the
+        Docker socket mounted (the provided run scripts do this).{% endif %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

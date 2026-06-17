@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Downloading — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('index') }}">← All models</a>
+    <header class="top"><h1>Download</h1></header>
+
+    <div id="running" class="statusline">
+      <span class="spinner"></span> <span id="msg">Starting…</span>
+    </div>
+    <div id="done" style="display:none">
+      <p id="result" class="statusline"></p>
+      <p><a class="btn" id="openModel" href="#">Open model</a>
+         <a class="btn secondary" href="{{ url_for('index') }}">All models</a></p>
+    </div>
+  </div>
+  <script>
+    const jobId = "{{ job_id }}";
+    async function poll() {
+      const d = await (await fetch("/api/status/" + jobId)).json();
+      document.getElementById("msg").textContent = d.message || "Working…";
+      if (d.state === "running") { setTimeout(poll, 1200); return; }
+      document.getElementById("running").style.display = "none";
+      const done = document.getElementById("done");
+      done.style.display = "block";
+      if (d.state === "done" && d.filename) {
+        document.getElementById("result").innerHTML =
+          '<span class="ok">✓ Downloaded ' + d.filename + '</span>';
+        document.getElementById("openModel").href = "/model/" + encodeURIComponent(d.filename);
+      } else {
+        document.getElementById("result").innerHTML =
+          '<span class="err">✗ ' + (d.message || "Failed") + '</span>';
+        document.getElementById("openModel").style.display = "none";
+      }
+    }
+    poll();
+  </script>
+</body>
+</html>
