@@ -18,8 +18,8 @@ back. No coding required.
 3. **An internet connection** the first time you run each model (to download its software)
    and whenever you download models from the online repository.
 
-That's it for normal use. A Claude API key is only needed for the optional
-"AI environment" feature (see below).
+That's it for normal use. A Claude API key is only needed for the optional AI features —
+the **AI environment** builder and the **Talk to your model** chat (see below).
 
 ## How to start it
 
@@ -61,13 +61,35 @@ given model also builds its software environment — this can take a few minutes
 internet; later runs of the same model are fast. When it finishes you'll see the plot(s)
 in the page and download links for the result files (CSVs, the R workspace, etc.).
 
+**Browse and compare past runs.** Every run is kept (until you remove that model's
+environment), so you can come back to it later. On a model's page click **🕘 Run history**
+in the header to see all its past runs, each tagged with its scenario, parameters and
+status. Click any run to reopen its result page, or tick two or more and **Compare** them
+side by side — plots in a column per run, a table highlighting the parameters that differ,
+and each run's data files.
+
+**Talk to your model.** Below the parameters on a model's page is a chat box. Ask Claude
+about the model — its purpose, parameters, equations, assumptions, or the bundled paper and
+documentation — and about its simulation results. Follow-up questions keep their context.
+The chat is grounded in what's actually in front of you: on a model's page it considers all
+stored runs, on a single run's page (and on the result page shown right after a run) just
+that run, and on a comparison page just the runs you selected. This needs a Claude API key
+(Settings); without one the chat is greyed out.
+
+**Stop the tool.** Click **⏻ Quit** in the header on the home page to shut the server down
+cleanly — this also stops and removes its Docker container, so you don't have to find the
+terminal window or force-stop anything in Docker Desktop. (Closing the terminal window with
+its ✕ does **not** reliably stop the container on Windows; use Quit, or press `Ctrl+C` in
+the terminal.)
+
 **Add a model.** Use the filter box to find a model, then just click any one that isn't
 downloaded yet — it's fetched from the RAKIP / FSKX public catalogue into your folder and
 opens ready to run. Use **⟳ Rescan** if you added `.fskx` files to the folder manually.
 
-**Free up space.** Each model's page has a **Remove environment** button that deletes its
-built environment, AI image, and stored run results (the model file stays; it just rebuilds
-next run). **🧹 Clean all caches** on the home page does this for every model at once.
+**Free up space.** The header on each model's page has a **🗑 Remove environment** button
+that deletes its built environment, AI image, and stored run results (the model file stays;
+it just rebuilds next run). **🧹 Clean all caches** on the home page does this for every
+model at once. Note that removing a model's environment also deletes its stored run history.
 
 **Models with complex software (advanced, optional).** A few models need extra system
 software (JAGS, Stan, OpenBUGS, GDAL…). If a model won't run, its result page offers
@@ -90,9 +112,10 @@ tries a corrected version.
 
 - **Models:** the `fskx_models` folder inside this directory by default (or whatever
   `MODELS_DIR` points to) — read-write, so repository downloads land here.
-- **Results:** kept inside the tool between runs and offered as downloads on the result
-  page. Save anything you want to keep to your own location — they're deleted when you
-  remove a model's environment or clean all caches.
+- **Results:** kept inside the tool between runs (and across restarts) and browsable any
+  time via **Run history** on the model's page — open a single run or compare several. They
+  are offered as downloads on the result page; save anything you want to keep to your own
+  location, as they're deleted when you remove a model's environment or clean all caches.
 
 ## Troubleshooting
 
@@ -100,6 +123,8 @@ tries a corrected version.
 - **A model's first run is slow** — that's the one-time environment build; it's cached
   afterward.
 - **AI features are greyed out** — set your API key in Settings, and make sure you started
-  the tool with the provided launcher (it grants the Docker access the feature needs).
+  the tool with the provided launcher (it grants the Docker access the feature needs). The
+  tool checks your key at startup; if you copied `.env.example` to `.env` but left the
+  `sk-ant-…` placeholder in place, or the key is rejected, Settings shows the reason.
 - **Something looks wrong with a result** — open the "Execution log" on the result page;
   it usually says what happened.

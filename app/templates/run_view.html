@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Run {{ run.run_id }} — {{ name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('runs_page', fskx=fskx) }}">← Run history</a>
+    <header class="top"><h1>{{ run.run_id[0:4] }}-{{ run.run_id[4:6] }}-{{ run.run_id[6:8] }}
+      {{ run.run_id[9:11] }}:{{ run.run_id[11:13] }}:{{ run.run_id[13:15] }}</h1></header>
+    <p class="sub">{{ name }}</p>
+
+    <div class="badges status" style="margin-bottom:14px">
+      <span class="badge {{ 'on' if run.ok else 'off' }}">{{ '✓ ok' if run.ok else '✗ failed' }}</span>
+      {% if run.scenario %}<span class="badge">{{ run.scenario }}</span>{% endif %}
+      {% if run.language %}<span class="badge lang-{{ run.language }}">{{ run.language|upper }}</span>{% endif %}
+      {% if run.warnings %}<span class="badge">⚠ {{ run.warnings|length }} warning(s)</span>{% endif %}
+    </div>
+
+    {% if run.params %}
+    <fieldset>
+      <legend>Parameters used</legend>
+      <div class="note">
+        {% for k, v in run.params.items() %}<code>{{ k }}={{ v }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+      </div>
+    </fieldset>
+    {% elif not run.has_meta %}
+    <p class="note">Parameters weren't recorded for this run (it predates run-parameter tracking).</p>
+    {% endif %}
+
+    {% if run.plots %}
+      {% if run.plots|length > 1 %}<p class="note">{{ run.plots|length }} plots generated:</p>{% endif %}
+      {% for p in run.plots %}
+        {% set url = '/runs/' + fskx + '/' + run.run_id + '/file/' + p %}
+        <figure class="plot-wrap">
+          {% if p.lower().endswith('.pdf') %}
+            <embed type="application/pdf" class="plot plot-pdf" src="{{ url }}">
+          {% else %}
+            <img class="plot" src="{{ url }}" alt="{{ p }}">
+          {% endif %}
+          <figcaption class="note"><a href="{{ url }}" download>{{ p }} ↓</a></figcaption>
+        </figure>
+      {% endfor %}
+    {% else %}
+      <p class="note">No plots were produced by this run.</p>
+    {% endif %}
+
+    {% if run.files %}
+    <div class="filelist">
+      <p class="note">Download results:</p>
+      {% for f in run.files %}
+        <a href="/runs/{{ fskx }}/{{ run.run_id }}/file/{{ f }}">{{ f }}</a>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <p style="margin-top:18px">
+      <a class="btn secondary" href="{{ url_for('model', fskx=fskx) }}">Run again with new parameters</a>
+      <a class="btn secondary" href="{{ url_for('runs_page', fskx=fskx) }}">Compare with other runs</a>
+    </p>
+
+    {% set chat_run_ids = [run.run_id] %}
+    {% set chat_scope = "the results of this run" %}
+    {% include "_chat.html" %}
+  </div>
+</body>
+</html>

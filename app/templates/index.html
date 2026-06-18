@@ -17,6 +17,8 @@
           <button type="submit" class="linkbtn">🧹 Clean all caches</button>
         </form>
         <a href="{{ url_for('settings') }}">⚙ Settings{% if not api_key_set %} <span class="dot"></span>{% endif %}</a>
+        <button type="button" class="linkbtn quit" onclick="quitApp()"
+                title="Stop the server and remove its Docker container">⏻ Quit</button>
       </nav>
     </header>
     <p class="sub">All models — local and from the online repository ({{ n_downloaded }} downloaded · {{ n_total }} total).
@@ -83,6 +85,20 @@
     </div>
   </div>
   <script>
+    async function quitApp() {
+      if (!confirm("Stop the FSKX Runner? This shuts down the server and removes its " +
+                   "Docker container. You'll need to relaunch (run.bat / run.sh) to use it again."))
+        return;
+      try { await fetch("/api/quit", { method: "POST" }); } catch (e) { /* server is exiting */ }
+      document.body.innerHTML =
+        '<div style="max-width:640px;margin:90px auto;padding:0 20px;' +
+        'font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#e6e8ee">' +
+        '<h1 style="font-size:20px;margin:0 0 10px">FSKX Runner has stopped</h1>' +
+        '<p style="color:#9aa3b4">The server has shut down and its Docker container has been ' +
+        'removed. You can close this browser tab. To use the tool again, start it with ' +
+        '<code>run.bat</code> (Windows) or <code>run.sh</code> (macOS/Linux).</p></div>';
+    }
+
     function filterList() {
       const q = document.getElementById("filter").value.toLowerCase();
       document.querySelectorAll(".model-row").forEach(r => {

@@ -47,7 +47,10 @@ echo (The FIRST run of each model also builds its environment, which may take a 
 echo  Later runs of the same model are fast. Close this window to stop.)
 echo.
 
-start "" %URL%
+REM Open the browser only once the server is actually accepting requests, so the user
+REM doesn't briefly see an "ERR_EMPTY_RESPONSE" page while the container is still starting.
+REM A hidden PowerShell helper polls /healthz (up to ~60s) and then opens the page.
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "$u='%URL%/healthz'; for($i=0;$i -lt 120;$i++){ try { Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 2 | Out-Null; Start-Process '%URL%'; break } catch { Start-Sleep -Milliseconds 500 } }"
 
 REM Models folder mounted read-write (for repository downloads); Docker socket mounted
 REM so the AI-assisted feature can build and run per-model images.

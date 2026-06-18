@@ -239,14 +239,41 @@ def _micromamba(*args):
     return ["micromamba", *args]
 
 
+# Minimum Python the in-environment wrapper (run_python_model.py) can run under: it
+# uses f-strings and other 3.6+ syntax, and modern scientific wheels need 3.8+. This
+# matters because conda-forge still ships EOL Pythons (3.4/3.5) on SOME platforms — notably
+# Windows/amd64 — but NOT on others (osx-arm64). So a model that declares e.g.
+# "Python 3.4.8" would build a working 3.4 env on Windows where the wrapper then fails to
+# even parse ("SyntaxError: invalid syntax"), yet fall back to a modern Python on macOS
+# where 3.4 isn't available. Flooring the requested version makes the behaviour identical
+# across platforms and keeps the wrapper runnable.
+MIN_PY = (3, 8)
+
+
+def _usable_py_version(mm):
+    """Return 'major.minor' if it is >= MIN_PY, else None (skip → modern fallback)."""
+    try:
+        parts = mm.split(".")
+        major, minor = int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        return None
+    return mm if (major, minor) >= MIN_PY else None
+
+
 def _create_python_env(spec, name, log):
     version = spec["version"]
     # Try the requested python version; fall back to a modern default if conda-forge
-    # no longer ships it (e.g. very old 3.4/3.5).
+    # no longer ships it (e.g. very old 3.4/3.5) OR if it is older than the runner needs.
     candidates = []
     if version:
         mm = ".".join(version.split(".")[:2])
-        candidates.append(mm)
+        usable = _usable_py_version(mm)
+        if usable:
+            candidates.append(usable)
+        else:
+            log.write(f"\n[env] requested python {version} is older than the minimum "
+                      f"{MIN_PY[0]}.{MIN_PY[1]} the runner supports; using a modern "
+                      "default instead\n")
     candidates.append("3.11")
     created = False
     for ver in candidates:

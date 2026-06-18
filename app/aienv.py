@@ -10,6 +10,7 @@ The image is keyed by the model's dependency hash, so once built it is reused ac
 app restarts (its existence is the cache).
 """
 
+import base64
 import json
 import os
 import platform
@@ -136,6 +137,58 @@ def host_arch():
 # ---------------------------------------------------------------------------
 # Docker availability
 # ---------------------------------------------------------------------------
+
+def key_format_ok(api_key):
+    """Cheap, offline plausibility check for an Anthropic key.
+
+    Catches the most common foot-gun: copying .env.example to .env and leaving the
+    `sk-ant-...` placeholder in place. That placeholder is a non-empty (truthy) string,
+    so a bare `if api_key:` happily treats it as configured and the first real API call
+    then 401s. Reject empty values, the literal placeholder (any `...`/`…`), and anything
+    not shaped like a real key.
+    """
+    key = (api_key or "").strip()
+    if not key or "..." in key or "…" in key:
+        return False
+    return key.startswith("sk-ant-") and len(key) >= 30
+
+
+def verify_api_key(api_key, model_id="claude-sonnet-4-6", timeout=20):
+    """Check that the key can actually reach the Anthropic API.
+
+    Returns (ok: bool, detail: str). Does the offline format check first, then a minimal
+    Messages call (max_tokens=1) so we learn the real auth/connectivity state instead of
+    only guessing from the string. Intended to run once at startup and whenever the key
+    changes — never on a hot path.
+    """
+    key = (api_key or "").strip()
+    if not key:
+        return False, "No API key set."
+    if not key_format_ok(key):
+        return False, ("The key looks like the placeholder from .env.example — replace "
+                       "sk-ant-... with your real key (it should start with sk-ant- and "
+                       "contain no '...').")
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {"model": model_id, "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}]}
+    try:
+        r = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=timeout)
+    except requests.RequestException as exc:
+        return False, f"Could not reach the Anthropic API: {exc}"
+    if r.status_code == 200:
+        return True, "Key verified — Claude is reachable."
+    if r.status_code in (401, 403):
+        return False, ("The API key was rejected by Anthropic "
+                       f"(HTTP {r.status_code} authentication_error). Check the key.")
+    if r.status_code == 404:
+        return False, (f"The model '{model_id}' is not accessible with this key "
+                       "(HTTP 404). Check the model id under Settings.")
+    return False, f"Anthropic API error {r.status_code}: {r.text[:200]}"
+
 
 def docker_available():
     """True if the docker CLI is present and can reach a daemon."""
@@ -327,3 +380,211 @@ def build_image(dockerfile_text, tag, log_path, progress=None):
         return proc.returncode == 0
     finally:
         shutil.rmtree(ctx, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# "Talk to your model" — a grounded chat over the model archive + its results
+# ---------------------------------------------------------------------------
+
+CHAT_SYSTEM_PROMPT = """\
+You are a knowledgeable assistant helping a food-safety researcher understand one FSKX
+predictive model and its simulation results. Answer using ONLY the MODEL CONTEXT and
+SIMULATION RESULTS provided below (plus the attached paper PDF, if any). If the answer
+isn't in the provided material, say so plainly instead of guessing. Be concise and
+precise, use the model's own parameter names and units, and when you discuss results refer
+to specific runs by their run id / timestamp where useful.
+
+===== MODEL CONTEXT =====
+{model_context}
+
+===== SIMULATION RESULTS =====
+{results_context}
+"""
+
+# Anthropic accepts PDFs up to ~32 MB / 100 pages; skip clearly oversized files.
+MAX_PDF_BYTES = 24 * 1024 * 1024
+
+
+def _find_paper_pdf(model_dir):
+    """Largest .pdf in the archive — almost always the source paper. None if none/oversized."""
+    best, best_size = None, -1
+    for root, _d, names in os.walk(model_dir):
+        for n in names:
+            if n.lower().endswith(".pdf"):
+                p = os.path.join(root, n)
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    continue
+                if size > best_size:
+                    best, best_size = p, size
+    if best and 0 < best_size <= MAX_PDF_BYTES:
+        return best
+    return None
+
+
+def _csv_sample(path, max_lines=8):
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            out = []
+            for i, ln in enumerate(fh):
+                if i >= max_lines:
+                    out.append("…(more rows)…")
+                    break
+                out.append(ln.rstrip("\n"))
+        return "\n".join(out)
+    except OSError:
+        return ""
+
+
+def _gather_model_context(model_dir):
+    """Readable text context describing the model itself (metadata, readme, scripts)."""
+    import omex
+    spec = depresolve.resolve(model_dir)
+    parts = [f"Language: {spec['language']}  Version: {spec['version'] or 'unspecified'}",
+             "Packages (declared + scanned): " + json.dumps(spec["packages"])]
+
+    meta = os.path.join(model_dir, "metaData.json")
+    if os.path.exists(meta):
+        parts.append("metaData.json:\n" + _read_clip(meta, 6000))
+
+    # README — declared role first, then common filenames.
+    readme_path = None
+    try:
+        scripts = omex.resolve_scripts(model_dir, spec["language"])
+    except Exception:  # noqa: BLE001
+        scripts = {}
+    for cand in ("README.txt", "README.md", "readme.txt", "README"):
+        p = os.path.join(model_dir, cand)
+        if os.path.exists(p):
+            readme_path = p
+            break
+    if readme_path:
+        parts.append(os.path.basename(readme_path) + ":\n" + _read_clip(readme_path, 3000))
+
+    for role, limit in (("model", 9000), ("visualization", 3000)):
+        fn = scripts.get(role)
+        if fn:
+            p = os.path.join(model_dir, fn)
+            if os.path.exists(p):
+                parts.append(f"{role} script ({fn}):\n" + _read_clip(p, limit))
+
+    # Scenario / parameter scripts, if present as a folder.
+    sim_dir = os.path.join(model_dir, "simulations")
+    if os.path.isdir(sim_dir):
+        names = sorted(os.listdir(sim_dir))[:4]
+        for n in names:
+            p = os.path.join(sim_dir, n)
+            if os.path.isfile(p):
+                parts.append(f"simulations/{n}:\n" + _read_clip(p, 1500))
+
+    return "\n\n".join(parts)
+
+
+def _gather_results_context(fskx_name, run_ids=None, per_run_limit=4000, total_limit=40000):
+    """
+    Digest of stored runs: params, results.json, CSV samples, warnings.
+
+    `run_ids` optionally restricts the digest to specific runs (e.g. the run being
+    viewed, or the runs selected for comparison). When None/empty, all runs are used.
+    A leading scope note tells the model exactly what it is and isn't seeing.
+    """
+    import engine
+    runs = engine.list_runs(fskx_name)
+    if run_ids:
+        wanted = set(run_ids)
+        runs = [r for r in runs if r["run_id"] in wanted]
+    if not runs:
+        if run_ids:
+            return ("The run(s) selected on this page could not be found among the "
+                    "stored results.")
+        return "No simulation runs are stored for this model yet."
+    scope_note = (f"(Scope: the {len(runs)} run(s) selected on this page — the user is "
+                  "asking specifically about these.)" if run_ids
+                  else f"(Scope: all {len(runs)} stored run(s) for this model.)")
+    blocks, total = [scope_note], 0
+    for r in runs:
+        if total >= total_limit:
+            blocks.append("…(further runs omitted to stay within size limits)…")
+            break
+        lines = [f"Run {r['run_id']}  (ok={r['ok']}, scenario={r.get('scenario')})"]
+        if r.get("params"):
+            lines.append("parameters: " + json.dumps(r["params"]))
+        if r.get("warnings"):
+            lines.append(f"visualization warnings: {len(r['warnings'])}")
+        rj = engine.run_file_path(fskx_name, r["run_id"], "results.json")
+        if rj:
+            txt = _read_clip(rj, per_run_limit)
+            lines.append("results.json:\n" + txt)
+        for f in r.get("files", []):
+            if f.lower().endswith((".csv", ".tsv")):
+                p = engine.run_file_path(fskx_name, r["run_id"], f)
+                if p:
+                    lines.append(f"{f} (sample):\n" + _csv_sample(p))
+        block = "\n".join(lines)
+        if len(block) > per_run_limit * 2:
+            block = block[:per_run_limit * 2] + "\n…(truncated)…"
+        blocks.append(block)
+        total += len(block)
+    return "\n\n".join(blocks)
+
+
+def chat_about_model(model_dir, fskx_name, messages, api_key, model_id, run_ids=None,
+                     max_tokens=1500):
+    """
+    Answer a (possibly multi-turn) conversation about a model and its results.
+
+    `messages` is the full browser-side conversation as a list of
+    {"role": "user"|"assistant", "content": "<text>"} — resent each turn so follow-up
+    questions keep their context. The model archive context and a digest of ALL stored
+    runs go into the system prompt; the paper PDF (if any) rides along with the first user
+    turn as a native document block. Returns the assistant's reply text.
+    """
+    system = CHAT_SYSTEM_PROMPT.format(
+        model_context=_gather_model_context(model_dir),
+        results_context=_gather_results_context(fskx_name, run_ids=run_ids),
+    )
+
+    api_messages = []
+    for m in messages:
+        role = m.get("role")
+        text = (m.get("content") or "").strip()
+        if role in ("user", "assistant") and text:
+            api_messages.append({"role": role, "content": text})
+    if not api_messages:
+        raise RuntimeError("No message to send.")
+
+    # Attach the paper PDF to the first user turn (resent each request; acceptable here).
+    pdf_path = _find_paper_pdf(model_dir)
+    if pdf_path:
+        for am in api_messages:
+            if am["role"] == "user":
+                try:
+                    data = base64.b64encode(open(pdf_path, "rb").read()).decode("ascii")
+                    am["content"] = [
+                        {"type": "document",
+                         "source": {"type": "base64", "media_type": "application/pdf",
+                                    "data": data}},
+                        {"type": "text", "text": am["content"]},
+                    ]
+                except OSError:
+                    pass
+                break
+
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "model": model_id,
+        "max_tokens": max_tokens,
+        "system": system,
+        "messages": api_messages,
+    }
+    r = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=180)
+    if r.status_code != 200:
+        raise RuntimeError(f"Anthropic API error {r.status_code}: {r.text[:500]}")
+    data = r.json()
+    return "".join(block.get("text", "") for block in data.get("content", [])
+                   if block.get("type") == "text").strip()

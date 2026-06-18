@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Run history — {{ name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('model', fskx=fskx) }}">← Back to model</a>
+    <header class="top"><h1>Run history</h1></header>
+    <p class="sub">{{ name }}</p>
+
+    {% if not runs %}
+      <div class="card"><p class="note">No stored runs yet. Run this model and its results
+      will be kept here for comparison until you remove the model's environment.</p></div>
+    {% else %}
+    <p class="desc">Click a run to open its result page, or tick two or more and compare
+      them side by side. {{ runs|length }} stored run(s).</p>
+    <form id="cmp" onsubmit="return goCompare(event)">
+      <div id="list">
+      {% for r in runs %}
+        <div class="card model-row" style="display:block">
+          <div class="row" style="justify-content:space-between; align-items:flex-start; gap:14px">
+            <div>
+              <div class="row" style="gap:10px; align-items:center">
+                <input type="checkbox" name="run" value="{{ r.run_id }}"
+                       title="Tick to compare this run with others">
+                <a href="{{ url_for('run_view_page', fskx=fskx, run_id=r.run_id) }}"><strong>{{ r.run_id[0:4] }}-{{ r.run_id[4:6] }}-{{ r.run_id[6:8] }}
+                  {{ r.run_id[9:11] }}:{{ r.run_id[11:13] }}:{{ r.run_id[13:15] }}</strong></a>
+              </div>
+              <div class="badges status" style="margin-top:8px">
+                <span class="badge {{ 'on' if r.ok else 'off' }}">{{ '✓ ok' if r.ok else '✗ failed' }}</span>
+                {% if r.scenario %}<span class="badge">{{ r.scenario }}</span>{% endif %}
+                {% if r.language %}<span class="badge lang-{{ r.language }}">{{ r.language|upper }}</span>{% endif %}
+                <span class="badge">{{ r.plots|length }} plot(s)</span>
+                <span class="badge">{{ r.files|length }} file(s)</span>
+                {% if r.warnings %}<span class="badge">⚠ {{ r.warnings|length }} warning(s)</span>{% endif %}
+                {% if not r.has_meta %}<span class="badge" title="Run predates parameter recording">params not recorded</span>{% endif %}
+              </div>
+              {% if r.params %}
+              <div class="note" style="margin-top:8px">
+                {% for k, v in r.params.items() %}<code>{{ k }}={{ v }}</code>{% if not loop.last %} · {% endif %}{% endfor %}
+              </div>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      {% endfor %}
+      </div>
+      <button class="btn" type="submit" style="margin-top:6px">Compare selected</button>
+      <span id="hint" class="note" style="margin-left:10px"></span>
+    </form>
+    {% endif %}
+  </div>
+  <script>
+    const fskx = "{{ fskx }}";
+    function goCompare(e) {
+      e.preventDefault();
+      const ids = [...document.querySelectorAll('input[name=run]:checked')].map(c => c.value);
+      if (ids.length < 2) {
+        document.getElementById("hint").textContent = "Pick at least two runs.";
+        return false;
+      }
+      location.href = "/compare/" + encodeURIComponent(fskx) + "?runs=" + ids.join(",");
+      return false;
+    }
+  </script>
+</body>
+</html>
