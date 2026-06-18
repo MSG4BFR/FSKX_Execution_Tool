@@ -35,7 +35,14 @@
         <summary class="note">Execution log</summary>
         <pre class="log" id="log"></pre>
       </details>
-      <p style="margin-top:20px"><a class="btn secondary" href="{{ url_for('model', fskx=job.fskx) }}">Run again with new parameters</a></p>
+      <p style="margin-top:20px">
+        <a class="btn secondary" href="{{ url_for('model', fskx=job.fskx) }}">Run again with new parameters</a>
+        <a class="btn secondary" href="{{ url_for('runs_page', fskx=job.fskx) }}">Run history &amp; compare</a>
+      </p>
+
+      {% with fskx=job.fskx, chat_scope='the results of this run' %}
+        {% include "_chat.html" %}
+      {% endwith %}
     </div>
   </div>
 
@@ -54,6 +61,9 @@
       document.getElementById("running").style.display = "none";
       const res = document.getElementById("results");
       res.style.display = "block";
+      // Scope the embedded chat to THIS run (falls back to all runs if there's no id,
+      // e.g. a run that failed before any results were written).
+      window.fskxChatRunIds = () => (d.run_id ? [d.run_id] : []);
       const summary = document.getElementById("summary");
       if (d.ok) summary.innerHTML = '<span class="ok">✓ Model finished successfully.</span>';
       else summary.innerHTML = '<span class="err">✗ The model did not complete. See the log below.</span>';

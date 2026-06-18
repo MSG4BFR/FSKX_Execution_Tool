@@ -8,8 +8,18 @@
 </head>
 <body>
   <div class="container">
-    <a class="back" href="{{ url_for('index') }}">← All models</a>
-    <header class="top"><h1>{{ info.name }}</h1></header>
+    <header class="top">
+      <h1>{{ info.name }}</h1>
+      <nav class="nav">
+        <a href="{{ url_for('index') }}">← All models</a>
+        <a href="{{ url_for('runs_page', fskx=info.fskx) }}">🕘 Run history</a>
+        <form method="post" action="{{ url_for('cleanup_model_route') }}" class="nav-form"
+              onsubmit="return confirm('Remove this model’s cached environment, image and stored run results? The environment rebuilds on the next run.')">
+          <input type="hidden" name="fskx" value="{{ info.fskx }}">
+          <button type="submit" class="linkbtn danger" title="Delete this model’s cached environment, AI image and stored run results">🗑 Remove environment</button>
+        </form>
+      </nav>
+    </header>
     <div class="badges" style="margin-bottom:14px">
       <span class="badge lang-{{ info.language }}">{{ info.language|upper }}{% if info.version %} {{ info.version }}{% endif %}</span>
       {% if info.hazard %}<span class="badge">{{ info.hazard }}</span>{% endif %}
@@ -59,7 +69,10 @@
     </form>
     {% endif %}
 
-    <div class="card" style="margin-top:22px">
+    {% set fskx = info.fskx %}
+    {% include "_chat.html" %}
+
+    <div class="card" style="margin-top:14px">
       <div class="row" style="justify-content:space-between; align-items:center">
         <div>
           <strong>Complex dependencies?</strong>
@@ -67,21 +80,6 @@
           GDAL…) the standard build may not cover it. Build a tailored environment with AI.</div>
         </div>
         <a class="btn secondary" href="{{ url_for('ai_page', fskx=info.fskx) }}">AI environment</a>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top:14px">
-      <div class="row" style="justify-content:space-between; align-items:center">
-        <div>
-          <strong>Reset environment</strong>
-          <div class="note">Delete this model’s cached environment, AI Docker image and
-          stored run results to reclaim disk. The model file stays; it rebuilds on the next run.</div>
-        </div>
-        <form method="post" action="{{ url_for('cleanup_model_route') }}"
-              onsubmit="return confirm('Remove this model’s cached environment, image and stored run results? The environment rebuilds on the next run.')">
-          <input type="hidden" name="fskx" value="{{ info.fskx }}">
-          <button class="btn secondary" type="submit">Remove environment</button>
-        </form>
       </div>
     </div>
   </div>

@@ -97,6 +97,9 @@ pre.log {
   color: var(--muted); font-size: 14px; font-family: inherit;
 }
 .linkbtn:hover { color: var(--accent); }
+.linkbtn.quit:hover { color: var(--bad); }
+.linkbtn.danger { color: var(--bad); }
+.linkbtn.danger:hover { color: #ff8a8a; }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-left: 2px; vertical-align: middle; }
 header.top { align-items: center; }
 textarea.code {

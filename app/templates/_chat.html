@@ -1,0 +1,195 @@
+<!-- Reusable inline chat component.
+     Requires: `fskx`, `api_key_set`.
+     Optional: `chat_scope` (label text), `chat_run_ids` (list -> scopes results). -->
+<div class="card chatbox" style="margin-top:22px">
+  <strong>Talk to this model</strong>
+  <div class="note">Ask Claude about this model — its metadata, paper, scripts and
+  documentation — and about {{ chat_scope if chat_scope is defined else 'its stored simulation results (all runs)' }}.
+  Follow-up questions keep their context.</div>
+
+  {% if not api_key_set %}
+    <p class="warn" style="margin-top:10px">⚠ Claude is not available — the chat is disabled.
+    {% if api_key_status is defined and api_key_status %}{{ api_key_status }}<br>{% endif %}
+    Add or fix your key under <a href="{{ url_for('settings') }}">⚙ Settings</a> to talk to this model.</p>
+  {% endif %}
+
+  <div class="chat-body{% if not api_key_set %} disabled{% endif %}"
+       {% if not api_key_set %}aria-disabled="true"{% endif %}>
+    <div class="chat-thread">
+      <div class="empty note">No messages yet. Try “What does this model predict?”,
+        “What are the input parameters and their units?” or
+        “Explain these results to me.”.</div>
+    </div>
+
+    <div class="chat-thinking statusline" style="display:none">
+      <span class="spinner"></span> <span>Claude is reading the model and results…</span>
+    </div>
+
+    <form class="composer chat-composer">
+      <textarea class="chat-input" placeholder="Ask a question…  (Enter to send, Shift+Enter for newline)"
+                spellcheck="false" {% if not api_key_set %}disabled{% endif %}></textarea>
+      <button class="btn chat-send" type="submit" {% if not api_key_set %}disabled{% endif %}>Send</button>
+    </form>
+  </div>
+</div>
+
+<style>
+  .chatbox .chat-body.disabled { opacity: .45; pointer-events: none; user-select: none; filter: grayscale(.4); }
+  .chatbox .chat-thread { display: flex; flex-direction: column; gap: 12px; margin: 16px 0; }
+  .chatbox .msg { padding: 11px 14px; border-radius: 12px; max-width: 88%;
+    line-height: 1.5; overflow-wrap: anywhere; }
+  .chatbox .msg.user { align-self: flex-end; background: var(--accent2); color: #fff;
+    border-bottom-right-radius: 4px; white-space: pre-wrap; }
+  .chatbox .msg.assistant { align-self: flex-start; background: var(--panel2);
+    border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .chatbox .msg.error { align-self: flex-start; background: var(--panel2);
+    border: 1px solid var(--bad); color: var(--bad); white-space: pre-wrap; }
+  /* rendered markdown inside an assistant bubble */
+  .chatbox .msg.assistant > :first-child { margin-top: 0; }
+  .chatbox .msg.assistant > :last-child { margin-bottom: 0; }
+  .chatbox .msg.assistant h1, .chatbox .msg.assistant h2, .chatbox .msg.assistant h3,
+  .chatbox .msg.assistant h4 { margin: 14px 0 6px; line-height: 1.3; }
+  .chatbox .msg.assistant h1 { font-size: 18px; }
+  .chatbox .msg.assistant h2 { font-size: 16px; }
+  .chatbox .msg.assistant h3 { font-size: 15px; }
+  .chatbox .msg.assistant h4 { font-size: 14px; color: var(--muted); }
+  .chatbox .msg.assistant p { margin: 8px 0; }
+  .chatbox .msg.assistant ul, .chatbox .msg.assistant ol { margin: 8px 0; padding-left: 22px; }
+  .chatbox .msg.assistant li { margin: 3px 0; }
+  .chatbox .msg.assistant code { background: #0b0d11; border: 1px solid var(--border);
+    border-radius: 5px; padding: 1px 5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px; }
+  .chatbox .msg.assistant pre { background: #0b0d11; border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0; }
+  .chatbox .msg.assistant pre code { background: none; border: none; padding: 0; }
+  .chatbox .msg.assistant hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+  .chatbox .msg.assistant table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  .chatbox .msg.assistant th, .chatbox .msg.assistant td { border: 1px solid var(--border);
+    padding: 5px 9px; text-align: left; }
+  .chatbox .composer { display: flex; gap: 10px; align-items: flex-end; }
+  .chatbox .composer textarea { flex: 1; min-height: 46px; max-height: 200px; resize: vertical;
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 11px 12px; font: inherit; }
+  .chatbox .composer textarea:focus { outline: none; border-color: var(--accent); }
+</style>
+
+<script>
+(function () {
+  const fskx = {{ fskx|tojson }};
+  {% if chat_run_ids is defined %}const runIds = {{ chat_run_ids|tojson }};{% else %}const runIds = [];{% endif %}
+  // A page may scope the chat to a run that is only known at runtime (e.g. the live run
+  // page, where the run id arrives once the job finishes). If it sets this hook, it wins
+  // over the render-time list; otherwise behaviour is unchanged.
+  const resolveRunIds = () =>
+    (typeof window.fskxChatRunIds === "function" ? window.fskxChatRunIds() : runIds) || [];
+  const boxes = document.querySelectorAll(".chatbox");
+  const box = boxes[boxes.length - 1];
+  const thread = box.querySelector(".chat-thread");
+  const input = box.querySelector(".chat-input");
+  const sendBtn = box.querySelector(".chat-send");
+  const thinking = box.querySelector(".chat-thinking");
+  const history = [];   // {role, content} — resent each turn so follow-ups keep context
+
+  // --- Minimal, dependency-free, XSS-safe markdown renderer for assistant replies ---
+  function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  function inlineMd(s) {            // operates on already-escaped text
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    s = s.replace(/(^|[^*])\*([^*\s][^*]*?)\*/g, "$1<em>$2</em>");
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, t, u) =>
+      /^(https?:|mailto:)/i.test(u) ? '<a href="' + u + '" target="_blank" rel="noopener">' + t + "</a>" : m);
+    return s;
+  }
+  function renderMarkdown(src) {
+    const lines = src.replace(/\r\n/g, "\n").split("\n");
+    let html = "", inCode = false, codeBuf = [], listType = null, listBuf = [];
+    const closeList = () => {
+      if (listType) { html += "<" + listType + ">" + listBuf.join("") + "</" + listType + ">"; listType = null; listBuf = []; }
+    };
+    for (const raw of lines) {
+      const fence = raw.match(/^```(\w*)\s*$/);
+      if (fence) {
+        if (!inCode) { closeList(); inCode = true; codeBuf = []; }
+        else { inCode = false; html += "<pre><code>" + esc(codeBuf.join("\n")) + "</code></pre>"; }
+        continue;
+      }
+      if (inCode) { codeBuf.push(raw); continue; }
+      const line = raw.replace(/\s+$/, "");
+      if (!line.trim()) { closeList(); continue; }
+      if (/^(---+|\*\*\*+|___+)$/.test(line.trim())) { closeList(); html += "<hr>"; continue; }
+      const h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) { closeList(); const l = h[1].length; html += "<h" + l + ">" + inlineMd(esc(h[2])) + "</h" + l + ">"; continue; }
+      const ul = line.match(/^(\s*)[-*+]\s+(.*)$/);
+      const ol = line.match(/^(\s*)\d+\.\s+(.*)$/);
+      if (ul || ol) {
+        const type = ul ? "ul" : "ol";
+        if (listType && listType !== type) closeList();
+        listType = type;
+        const m = ul || ol;
+        const indented = m[1].length >= 2;
+        listBuf.push("<li" + (indented ? ' style="margin-left:1.1em"' : "") + ">" + inlineMd(esc(m[2])) + "</li>");
+        continue;
+      }
+      closeList();
+      html += "<p>" + inlineMd(esc(line)) + "</p>";
+    }
+    closeList();
+    if (inCode) html += "<pre><code>" + esc(codeBuf.join("\n")) + "</code></pre>";
+    return html;
+  }
+
+  function addBubble(role, text) {
+    const empty = thread.querySelector(".empty");
+    if (empty) empty.remove();
+    const div = document.createElement("div");
+    div.className = "msg " + role;
+    if (role === "assistant") div.innerHTML = renderMarkdown(text);
+    else div.textContent = text;
+    thread.appendChild(div);
+    div.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return div;
+  }
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text) return;
+    addBubble("user", text);
+    history.push({ role: "user", content: text });
+    input.value = "";
+    input.disabled = sendBtn.disabled = true;
+    thinking.style.display = "block";
+    try {
+      const body = { fskx, messages: history };
+      const ids = resolveRunIds();
+      if (ids && ids.length) body.run_ids = ids;
+      const resp = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const d = await resp.json();
+      if (!resp.ok || d.error) {
+        addBubble("error", d.error || ("Request failed (" + resp.status + ")."));
+      } else {
+        addBubble("assistant", d.reply || "(no answer)");
+        history.push({ role: "assistant", content: d.reply || "" });
+      }
+    } catch (e) {
+      addBubble("error", "Network error: " + e);
+    } finally {
+      thinking.style.display = "none";
+      input.disabled = sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  box.querySelector(".chat-composer").addEventListener("submit", e => {
+    e.preventDefault(); send();
+  });
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+})();
+</script>

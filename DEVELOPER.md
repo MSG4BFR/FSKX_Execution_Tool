@@ -134,6 +134,48 @@ wrappers capture new/modified files **recursively** (preserving subpaths), and
 device captures first) and listing the rest as downloads. Result URLs encode each path
 segment but keep the slashes; the `result_file` traversal guard still applies.
 
+### §2.y Run history, comparison & "talk to your model"
+
+Two later features share one foundation: **the persisted run is the source of truth**, read
+straight from the `fskx_work` volume rather than from the in-memory `JOBS` registry (which
+resets on restart, orphaning otherwise-intact result folders).
+
+- **Run sidecar.** `engine.execute` writes a `run_meta.json` into each run's `outdir`
+  (scenario, submitted params, language/backend, ok flag, plots/files, warnings). Runs were
+  already persisted under `/work/_results/<base>/<run_id>/`; the sidecar records *what the
+  run was*, which nothing captured before. Runs predating it still list (params shown as
+  "not recorded"); `list_runs` re-scans the folder so plots/files appear regardless.
+
+- **Disk-based access.** `engine.list_runs(fskx)` enumerates `_results/<base>/*` newest-first
+  (`<base>` = `splitext(fskx)[0]`, same key as the extraction dir and cleanup). `run_dir` /
+  `run_file_path` resolve a run and a file within it with traversal guards. The server exposes
+  these independent of `JOBS`: `runs_page` (history, multi-select), `compare_page`
+  (`?runs=id,id` → per-run plot columns + a param table flagging differences), `run_view_page`
+  (single stored run), and `run_stored_file` (`/runs/<fskx>/<run_id>/file/<path:name>`, same
+  inline-image/download + guard logic as `result_file`). Because everything reads the volume,
+  history survives restarts and is reachable even when no live job exists.
+
+- **Chat.** `aienv.chat_about_model` builds a grounded system prompt from the archive
+  (`_gather_model_context`: metaData.json, README, model/viz/scenario scripts, packages) plus
+  a digest of stored runs (`_gather_results_context`: per-run params, `results.json`, CSV
+  samples, warnings — **size-capped per-run and overall**, with a leading scope note). A paper
+  PDF in the archive is attached to the first user turn as a native document block. The
+  conversation lives **client-side** (`_chat.html`) and is resent in full each turn, so
+  follow-ups keep context; the assistant reply is rendered with a small dependency-free,
+  XSS-safe markdown renderer. `_chat.html` is a **reusable partial** embedded on the model
+  page, the single-run page, the compare page, the **live run-results page** (`run.html`) and
+  the standalone `/chat`, greyed/disabled when no usable API key is set.
+
+- **Results scoping.** The chat partial optionally posts `run_ids`; `_gather_results_context`
+  filters to them (else all runs). The pages set it so the AI sees exactly what's on screen:
+  the model page → all runs, a single-run page → that run, the compare page → the selected
+  runs. The visible label and the prompt's scope note are kept in sync. The live run-results
+  page can't know its `run_id` at render time (the job may still be running), so the partial
+  also consults an optional `window.fskxChatRunIds()` hook resolved **at send time**;
+  `run.html` sets it from the finished job's `run_id` (surfaced in `/api/status`), falling
+  back to all runs if the run produced none. Render-time `chat_run_ids` still wins on the
+  other pages — the hook is opt-in and backward compatible.
+
 ---
 
 ## 3. Key components
@@ -148,7 +190,9 @@ segment but keep the slashes; the `result_file` traversal guard still applies.
 - **`engine.py`** — Orchestration: extraction, parameter generation, backend selection,
   run dispatch, output collection/classification (`classify_outputs`), the AI generate/build
   helpers, live status (`model_status`), and cache cleanup (`cleanup_model` / `cleanup_all`).
-  Script/scenario resolution and parameters now come from `omex.py` (see §2.x).
+  Script/scenario resolution and parameters now come from `omex.py` (see §2.x). Also owns the
+  **run-history** layer (`write_run_meta`, `list_runs`, `run_dir` / `run_file_path`) and the
+  **chat** entry point (`chat_about_model`, which delegates to `aienv`). See §2.y.
 
 - **`omex.py`** — FSKX/OMEX introspection. Parses `metadata.rdf` for file ROLES
   (`modelScript` / `visualizationScript` / `readme`) and `sim.sedml` for SIMULATION DATA
@@ -180,14 +224,21 @@ segment but keep the slashes; the `result_file` traversal guard still applies.
 - **`aienv.py`** — The AI path: gathers model context (language, deps, scripts, host arch,
   matched recipes, previous attempt + error), prompts Claude for a Dockerfile, sanitizes
   it (strip fences, neutralize ENTRYPOINT/CMD, ensure the wrapper `COPY`), builds a
-  per-model image, and runs it as a sibling container.
+  per-model image, and runs it as a sibling container. It also hosts the **chat** backend
+  (`chat_about_model` + `_gather_model_context` / `_gather_results_context` + the Anthropic
+  Messages call), reusing the same `requests` plumbing and the in-memory API key/model. See
+  §2.y.
 
 - **`server.py`** — Flask routes + a small in-memory job registry (runs, downloads, AI
   generate/build, and cleanup all run in background threads and are polled by the page JS).
   In-memory settings (API key/model), `LAST_ERROR` and `LAST_DOCKERFILE` per model for AI
   iteration. The unified home page lives here (`index` + `_local_entry`); `cleanup_model` /
   `cleanup_all` routes drive the per-model "Remove environment" and global "Clean all
-  caches" actions.
+  caches" actions. Newer routes: **run history/comparison** (`runs_page`, `compare_page`,
+  `run_view_page`, and the disk-based `run_stored_file`), the **chat** API (`chat_page` +
+  `api_chat`), a **quit** control (`api_quit` → `os._exit` after flushing the response, which
+  also stops the `--rm` container), and a cheap **`healthz`** readiness probe the launchers
+  poll before opening the browser. See §2.y.
 
 ---
 
@@ -288,6 +339,30 @@ These are real issues from building the tool. Keep them in mind before "simplify
     image is itself rebuilt every `run.sh` launch, so engine/template/wrapper
     changes land on restart; only per-model images are cached.
 
+19. **Old declared Python broke the wrapper on Windows only.** `packages.json` may declare
+    an EOL version (e.g. the egg model says `Python 3.4.8`). conda-forge still ships those
+    on **some** platforms (Windows/amd64) but **not** others (osx-arm64), so the same model
+    built a real 3.4 env on Windows — where the wrapper itself (`run_python_model.py`, which
+    uses f-strings) failed to *parse* (`SyntaxError`) — while macOS silently fell back to a
+    modern Python and worked. Fix: `depresolve.MIN_PY = (3, 8)` floors the requested version
+    (`_usable_py_version`); anything below it is skipped in favour of the modern default, so
+    behaviour is identical across platforms. Note `env_key` still hashes the *declared*
+    version, so a previously-built broken 3.4 env is reused until removed once via
+    "Remove environment" / "Clean all caches". Don't lower the floor below 3.6 (f-strings);
+    practically keep it at 3.8+ for modern wheels.
+
+20. **A truthy placeholder API key looked "set".** `.env.example` ships
+    `ANTHROPIC_API_KEY=sk-ant-...`; copying it to `.env` unchanged left a non-empty (truthy)
+    string, so the old `bool(api_key)` gate enabled the chat / AI builder and the first real
+    call 401'd. Fix: `aienv.key_format_ok` (offline placeholder/shape check) +
+    `aienv.verify_api_key` (a one-shot `max_tokens=1` ping). `server` runs this once at
+    startup and on every Settings save (`_verify_api_key_async`), caches the outcome in
+    `SETTINGS["api_key_valid"]`/`["api_key_status"]`, and gates features on `_api_key_usable`
+    (plausible shape AND not a confirmed failure; a still-running check passes optimistically
+    so a valid key isn't briefly blocked). The reason is surfaced on Settings, in the chat
+    box, and in the `/api/chat` / `/api/ai/generate` errors. Keep the verification off the
+    hot path — it costs one tiny API call.
+
 ## 5. Known limitations & future pitfalls
 
 - **Security: the Docker socket.** Mounting `/var/run/docker.sock` gives the app container
@@ -327,7 +402,30 @@ These are real issues from building the tool. Keep them in mind before "simplify
   under `/work/_results/<model>/` on the `fskx_work` volume (never the host models folder).
   Nothing prunes them automatically *except* the cleanup actions: `cleanup_model` deletes
   that model's results (and image + env), `cleanup_all` deletes the whole `_results` tree.
-  No retention cap and no "save to host folder" option yet — both are natural next steps.
+  They are now browsable/comparable in the UI (Run history, see §2.y), but there is still
+  **no retention cap** and **no "save to host folder"** option — both natural next steps.
+  Note removing a model's environment also wipes its run history.
+
+- **Chat context size & cost.** `_gather_results_context` digests *all* (or the scoped) runs
+  with per-run and total caps, and the paper PDF is resent on every turn (it rides the first
+  user message), so long conversations or many large runs grow the prompt and the per-call
+  cost. No prompt caching and no streaming yet; `/api/chat` is synchronous (a turn blocks one
+  request thread up to the Anthropic timeout). Tighten the caps or add caching/streaming if
+  this bites. The markdown renderer in `_chat.html` is deliberately minimal (headings, lists,
+  emphasis, code, hr, links, simple tables) — escape-first and link-scheme-filtered for XSS,
+  but it is not a full CommonMark parser.
+
+- **Quit is a hard process exit.** `api_quit` schedules `os._exit(0)` after flushing the
+  response. Because the container runs `--rm` with the server as its main process, this stops
+  *and* removes the container — the cross-platform way to avoid orphaned containers from a
+  hard terminal close (which does **not** reliably stop a foreground `docker run` on Windows;
+  `Ctrl+C` does). It does not gracefully drain in-flight background jobs (env/image builds);
+  acceptable for a single-user tool, revisit if that ever matters.
+
+- **Launcher browser timing.** The launchers open the browser only after polling `/healthz`
+  (PowerShell on Windows, `curl` on macOS/Linux), so the user no longer hits a transient
+  `ERR_EMPTY_RESPONSE` while the container starts. The poll has a bounded retry budget
+  (~60s); a much slower first start would time out the *browser open* (not the server).
 
 - **Parameter parsing is line-based.** `parse_assignments` handles single-line
   `name <- value` / `name = value`. Multi-line or computed parameter assignments in a

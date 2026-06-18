@@ -73,8 +73,12 @@ docker run --rm \
   "$IMAGE" &
 CONTAINER_PID=$!
 
-# Open the browser once the server is up.
-( sleep 3
+# Open the browser only once the server actually responds (poll /healthz), so the user
+# never lands on a transient "didn't send any data" page while the container is starting.
+( for _ in $(seq 1 120); do
+    curl -fsS "$URL/healthz" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
   if command -v open >/dev/null 2>&1; then open "$URL"
   elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$URL"
   fi ) >/dev/null 2>&1 || true

@@ -17,6 +17,16 @@
 
     {% if saved %}<div class="card"><span class="ok">✓ Saved.</span></div>{% endif %}
 
+    {% if api_key_status %}
+    <div class="card">
+      <div class="note">Claude API key:
+        {% if api_key_valid %}<span class="ok">✓ {{ api_key_status }}</span>
+        {% elif api_key_valid is none %}<span>⋯ {{ api_key_status }}</span>
+        {% else %}<span class="err">✗ {{ api_key_status }}</span>{% endif %}
+      </div>
+    </div>
+    {% endif %}
+
     <form method="post">
       <fieldset>
         <legend>Claude API</legend>

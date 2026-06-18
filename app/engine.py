@@ -388,6 +388,105 @@ def classify_outputs(outdir):
     return plots, files
 
 
+# ---------------------------------------------------------------------------
+# Persisted run history (read straight from the fskx_work volume)
+#
+# Run result folders live at  WORK_DIR/_results/<base>/<run_id>/  and persist until
+# an explicit cleanup. The in-memory JOBS registry that serves the live result page is
+# lost on restart, so these helpers expose the already-persisted runs independently of
+# any job: enumerate them, read their sidecar metadata, and resolve a file safely.
+# ---------------------------------------------------------------------------
+
+RESULTS_ROOT = os.path.join(WORK_DIR, "_results")
+RUN_META_NAME = "run_meta.json"
+
+
+def _model_base(fskx_name):
+    return os.path.splitext(fskx_name)[0]
+
+
+def model_results_dir(fskx_name):
+    return os.path.join(RESULTS_ROOT, _model_base(fskx_name))
+
+
+def write_run_meta(outdir, meta):
+    """Write the per-run sidecar describing a run (scenario, params, outputs)."""
+    try:
+        with open(os.path.join(outdir, RUN_META_NAME), "w", encoding="utf-8") as fh:
+            json.dump(meta, fh)
+    except OSError:
+        pass
+
+
+def _read_run_meta(run_path):
+    p = os.path.join(run_path, RUN_META_NAME)
+    if os.path.exists(p):
+        try:
+            return json.load(open(p, encoding="utf-8"))
+        except (ValueError, OSError):
+            pass
+    return {}
+
+
+def list_runs(fskx_name):
+    """
+    All persisted runs for a model, newest first. Each entry merges the run_meta
+    sidecar with a live re-scan of the folder (so older runs lacking a sidecar still
+    show their plots/files). Returns a list of dicts with at least: run_id, ok,
+    scenario, params, plots, files, warnings.
+    """
+    base_dir = model_results_dir(fskx_name)
+    runs = []
+    if not os.path.isdir(base_dir):
+        return runs
+    for run_id in sorted(os.listdir(base_dir), reverse=True):
+        run_path = os.path.join(base_dir, run_id)
+        if not os.path.isdir(run_path):
+            continue
+        meta = _read_run_meta(run_path)
+        plots, files = classify_outputs(run_path)
+        status = {}
+        sp = os.path.join(run_path, "status.json")
+        if os.path.exists(sp):
+            try:
+                status = json.load(open(sp, encoding="utf-8"))
+            except (ValueError, OSError):
+                pass
+        runs.append({
+            "run_id": run_id,
+            "ok": meta.get("ok", True),
+            "scenario": meta.get("scenario"),
+            "language": meta.get("language"),
+            "backend": meta.get("backend"),
+            "params": meta.get("params", {}),
+            "plots": plots,
+            "files": files,
+            "warnings": meta.get("warnings") or status.get("warnings", []),
+            "has_meta": bool(meta),
+        })
+    return runs
+
+
+def run_dir(fskx_name, run_id):
+    """Resolve a run folder, guarding against path traversal in run_id."""
+    base_dir = model_results_dir(fskx_name)
+    path = os.path.normpath(os.path.join(base_dir, run_id))
+    if not path.startswith(os.path.normpath(base_dir) + os.sep):
+        return None
+    return path if os.path.isdir(path) else None
+
+
+def run_file_path(fskx_name, run_id, name):
+    """Resolve a file inside a stored run, guarding against traversal (run_id + name)."""
+    rd = run_dir(fskx_name, run_id)
+    if not rd:
+        return None
+    path = os.path.normpath(os.path.join(rd, name))
+    if not path.startswith(os.path.normpath(rd) + os.sep) or not os.path.isfile(path):
+        return None
+    return path
+
+
 def execute(fskx_name, scenario_name, submitted_values, progress=None):
     """
     Full pipeline for one run. `progress` is an optional callable(str) for status
@@ -479,6 +578,22 @@ def execute(fskx_name, scenario_name, submitted_values, progress=None):
     if rc == 0:
         state.mark_executed(fskx_name)
 
+    # Record what this run was, so it can be browsed/compared/explained later straight
+    # from the persisted volume (the in-memory job is gone after a restart). Best-effort:
+    # a failure to write the sidecar must never fail the run itself.
+    write_run_meta(outdir, {
+        "fskx": fskx_name,
+        "run_id": run_id,
+        "scenario": scenario_name,
+        "language": language,
+        "backend": backend["type"],
+        "ok": rc == 0,
+        "params": submitted_values,
+        "plots": plots,
+        "files": files,
+        "warnings": status.get("warnings", []),
+    })
+
     return {
         "ok": rc == 0,
         "language": language,
@@ -508,6 +623,20 @@ def ai_generate_dockerfile(fskx_name, api_key, model_id, error_log="", prev_dock
         model_dir, api_key, model_id, error_log=error_log,
         prev_dockerfile=prev_dockerfile)
     return aienv.image_tag(spec), dockerfile
+
+
+def chat_about_model(fskx_name, messages, api_key, model_id, run_ids=None):
+    """Answer a conversation about a model and its stored results (see aienv).
+
+    `run_ids` optionally scopes the results context to specific runs (the run being
+    viewed, or the runs selected for comparison); None means all runs.
+    """
+    import aienv
+    model_dir = os.path.join(WORK_DIR, _model_base(fskx_name))
+    if not os.path.isdir(model_dir):
+        model_dir = extract_model(fskx_name)
+    return aienv.chat_about_model(model_dir, fskx_name, messages, api_key, model_id,
+                                  run_ids=run_ids)
 
 
 def ai_build_image(fskx_name, dockerfile_text, progress=None):

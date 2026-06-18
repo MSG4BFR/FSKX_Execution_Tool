@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Compare runs — {{ name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    .cmp-grid { display: grid; gap: 16px; grid-auto-flow: column;
+      grid-auto-columns: minmax(280px, 1fr); overflow-x: auto; padding-bottom: 8px; }
+    .cmp-col { border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+      background: var(--panel); min-width: 280px; }
+    .cmp-col h3 { margin: 0 0 10px; font-size: 15px; }
+    table.diff { width: 100%; border-collapse: collapse; margin: 8px 0 24px; font-size: 13px; }
+    table.diff th, table.diff td { text-align: left; padding: 6px 10px;
+      border-bottom: 1px solid var(--border); vertical-align: top;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    table.diff th { color: var(--muted); font-weight: 600; }
+    table.diff tr.differs td, table.diff tr.differs th { background: rgba(255,200,87,.08); }
+    table.diff tr.differs .pname { color: var(--warn); }
+    .cmp-col img.plot { margin: 6px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('runs_page', fskx=fskx) }}">← Run history</a>
+    <header class="top"><h1>Compare runs</h1></header>
+    <p class="sub">{{ name }} · {{ runs|length }} runs</p>
+
+    {% if runs|length < 2 %}
+      <div class="card"><p class="note">Pick at least two runs to compare from the
+        <a href="{{ url_for('runs_page', fskx=fskx) }}">run history</a>.</p></div>
+    {% else %}
+
+    {% if param_rows %}
+    <h3 style="font-size:16px">Parameters</h3>
+    <table class="diff">
+      <tr>
+        <th>parameter</th>
+        {% for r in runs %}<th>{{ r.run_id[6:8] }} {{ r.run_id[9:11] }}:{{ r.run_id[11:13] }}:{{ r.run_id[13:15] }}</th>{% endfor %}
+      </tr>
+      {% for row in param_rows %}
+      <tr class="{{ 'differs' if row.differs }}">
+        <th class="pname">{{ row.name }}</th>
+        {% for v in row.cells %}<td>{{ v }}</td>{% endfor %}
+      </tr>
+      {% endfor %}
+    </table>
+    <p class="note" style="margin-top:-16px">Highlighted rows differ between runs.</p>
+    {% else %}
+    <p class="note">No recorded parameters for these runs.</p>
+    {% endif %}
+
+    <h3 style="font-size:16px; margin-top:24px">Plots &amp; data</h3>
+    <div class="cmp-grid">
+      {% for r in runs %}
+      <div class="cmp-col">
+        <h3>{{ r.run_id[0:4] }}-{{ r.run_id[4:6] }}-{{ r.run_id[6:8] }}
+          {{ r.run_id[9:11] }}:{{ r.run_id[11:13] }}:{{ r.run_id[13:15] }}</h3>
+        <div class="badges status" style="margin-bottom:10px">
+          <span class="badge {{ 'on' if r.ok else 'off' }}">{{ '✓ ok' if r.ok else '✗ failed' }}</span>
+          {% if r.scenario %}<span class="badge">{{ r.scenario }}</span>{% endif %}
+        </div>
+        {% for p in r.plots %}
+          {% set url = '/runs/' + fskx + '/' + r.run_id + '/file/' + p %}
+          {% if p.lower().endswith('.pdf') %}
+            <embed type="application/pdf" class="plot plot-pdf" src="{{ url }}">
+          {% else %}
+            <img class="plot" src="{{ url }}" alt="{{ p }}">
+          {% endif %}
+          <div class="note"><a href="{{ url }}" download>{{ p }} ↓</a></div>
+        {% endfor %}
+        {% if not r.plots %}<p class="note">No plots.</p>{% endif %}
+        {% if r.files %}
+        <div class="filelist" style="margin-top:10px">
+          {% for f in r.files %}
+            <a href="/runs/{{ fskx }}/{{ r.run_id }}/file/{{ f }}">{{ f }}</a>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+
+    {% set chat_run_ids = runs|map(attribute='run_id')|list %}
+    {% set chat_scope = "the " ~ runs|length ~ " runs selected for comparison" %}
+    {% include "_chat.html" %}
+    {% endif %}
+  </div>
+</body>
+</html>

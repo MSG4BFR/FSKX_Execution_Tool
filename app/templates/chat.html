@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Talk to model — {{ name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="{{ url_for('model', fskx=fskx) }}">← Back to model</a>
+    <header class="top"><h1>Talk to this model</h1></header>
+    <p class="sub">{{ name }} · {{ n_runs }} stored run(s) · {{ model_id }}</p>
+    {% include "_chat.html" %}
+  </div>
+</body>
+</html>
