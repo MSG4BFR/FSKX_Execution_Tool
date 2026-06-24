@@ -869,16 +869,25 @@ function edgeField(i,k,v){
   }
   edges[i][k]=v; renderAll();
 }
-function edgeRaw(i,k,v){ edges[i][k]=v; drawWires(); saveState(); }
+function edgeRaw(i,k,v){
+  edges[i][k]=v;
+  // Keep the two views (canvas edge panel <-> connections table) in sync without a full
+  // re-render, so the input currently being typed in keeps its focus/cursor. Push the new
+  // value into any *sibling* input bound to the same edge field.
+  document.querySelectorAll('[data-ei="'+i+'"][data-ek="'+k+'"]').forEach(function(el){
+    if(el!==document.activeElement && el.value!==v) el.value=v;
+  });
+  drawWires(); saveState();
+}
 function renderEdges(){
   const box = document.getElementById('edges'); box.innerHTML='';
   edges.forEach((e,i)=>{
     const tf = e.tf||'none';
     const extra = tf==='affine'
-        ? `<div class="tf-extra"><input style="width:78px" placeholder="scale" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)">
-           <input style="width:78px" placeholder="offset" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
+        ? `<div class="tf-extra"><input data-ei="${i}" data-ek="scale" style="width:78px" placeholder="scale" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)">
+           <input data-ei="${i}" data-ek="offset" style="width:78px" placeholder="offset" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
       : tf==='expression'
-        ? `<input style="width:160px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)">` : '';
+        ? `<input data-ei="${i}" data-ek="expr" style="width:160px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)">` : '';
     const row = document.createElement('div'); row.className='row-line';
     if(i===selectedEdge) row.style.borderColor='var(--accent2)';
     row.innerHTML = `
@@ -932,10 +941,10 @@ function renderEdgePanel(){
   if(selectedEdge==null || selectedEdge>=edges.length){ box.innerHTML=''; return; }
   const e = edges[selectedEdge], i = selectedEdge, tf = e.tf||'none';
   const extra = tf==='affine'
-      ? `<div class="col"><label>scale</label><input style="width:80px" placeholder="1" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)"></div>
-         <div class="col"><label>offset</label><input style="width:80px" placeholder="0" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
+      ? `<div class="col"><label>scale</label><input data-ei="${i}" data-ek="scale" style="width:80px" placeholder="1" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)"></div>
+         <div class="col"><label>offset</label><input data-ei="${i}" data-ek="offset" style="width:80px" placeholder="0" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
     : tf==='expression'
-      ? `<div class="col"><label>expression</label><input style="width:170px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)"></div>` : '';
+      ? `<div class="col"><label>expression</label><input data-ei="${i}" data-ek="expr" style="width:170px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)"></div>` : '';
   box.innerHTML = `<div class="edgepanel">
     <div class="col"><label>Selected connection</label>
       <span class="wire-label">${stepLabel(e.src_node)}.${e.src_param} → ${stepLabel(e.tgt_node)}.${e.tgt_param}</span></div>

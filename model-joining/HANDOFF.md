@@ -85,6 +85,10 @@ just needed a typed interchange format and an orchestration layer that injects v
   collapsible ports, two-line names. The old per-node parameter editor (**locked bound fields**)
   + edge transform table live under a collapsible "Advanced editor". Working draft (incl. node
   positions + view) autosaves to `localStorage`. The pipeline JSON contract is unchanged.
+  **Two-view sync:** transform-value inputs (scale/offset/expr) carry `data-ei`/`data-ek` tags;
+  `edgeRaw` pushes each edit into the matching sibling input across the canvas panel ↔ table
+  (skipping the focused one, so no cursor jump) without a full re-render — fixes a lag where a
+  transform edited on the canvas updated the table only after a save / "Add connection".
 - `app/server.py` — `/join`, `/api/model-params/<fskx>`, `/api/pipeline/validate|run|status`.
 - `app/engine.py` — `model_param_specs`; `app/templates/run_view.html` shows "Joined
   parameters"; `index.html` nav link.
@@ -93,12 +97,17 @@ just needed a typed interchange format and an orchestration layer that injects v
 
 ### Phase 4 — Packaging ✅ (persistence + sharing)
 - `app/pipeline_store.py` — CRUD for `pipeline.json` records on the work volume; composite
-  `.fskxp` archive **build/import** (embeds member `.fskx`).
+  `.fskxp` archive **build/import** (embeds member `.fskx`). The archive is now
+  **COMBINE/OMEX-conformant**: `build_manifest_xml` emits an `omexManifest` registering every
+  entry with its COMBINE format URI (`pipeline.json` flagged `master`), `build_metadata_rdf`
+  emits archive `metadata.rdf`; `import_archive` reads the manifest's `master` (falling back to
+  `pipeline.json`) so new OMEX and old plain-zip archives both import. **Live-verified:** a real
+  export → import round-trip was run in the app and works.
 - `app/server.py` — `/api/pipelines` (GET/POST), `/api/pipelines/<id>` (GET),
   `/delete`, `/export`, `/import`.
 - `app/templates/join.html` — "Saved pipelines" bar (save / save-as-new / load / delete /
   export / import).
-- `tests/test_pipeline_store.py` (12 checks).
+- `tests/test_pipeline_store.py` (18 checks — incl. OMEX manifest well-formedness + back-compat).
 
 ---
 
@@ -125,11 +134,15 @@ machine with Docker + R** (see DEVELOPER.md §7) — the dev sandbox has neither
 ## 5. Open TODOs
 
 ### High value / user-requested
-1. **OMEX-conformant `.fskxp` manifest.** The export is currently a plain zip
-   (`pipeline.json` + `models/*.fskx` + `manifest.json`). Make it a real OMEX/COMBINE archive
-   with `manifest.xml` (+ optional RDF) so other FSKX tools have a path to read it. Touch:
-   `pipeline_store.build_archive` / `import_archive`. Consider whether to express the join
-   wiring itself in SED-ML for standards alignment.
+1. ~~**OMEX-conformant `.fskxp` manifest.**~~ ✅ DONE. The export is now a COMBINE/OMEX
+   archive: `manifest.xml` (`omexManifest`) registers every entry by COMBINE format URI with
+   `pipeline.json` as `master`, plus archive `metadata.rdf`; the legacy `manifest.json` is kept
+   for human/older readers; `import_archive` reads the manifest `master` and stays back-compat.
+   See `pipeline_store.build_manifest_xml` / `build_metadata_rdf` / `build_archive` /
+   `import_archive` and `tests/test_pipeline_store.py`. **Still open:** expressing the join
+   **wiring** in a standard construct — there is no SED-ML element for cross-model parameter
+   joins, so the wiring stays app-private in `pipeline.json` (registered as `master`). Revisit
+   if a standard cross-model construct emerges, or pair with a reference archive (#6).
 2. **Scenario-per-node selection.** Nodes currently run the model's default scenario
    (`node.scenario` is unused in the UI). Add a scenario dropdown per node in `join.html`
    (data already available from `engine.scenario_names` / `model_info["scenarios"]`); pass

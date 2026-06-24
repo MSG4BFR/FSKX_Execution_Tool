@@ -25,7 +25,7 @@ key reason cross-language/version interop is automatic.
 | [1 — Serialization layer](phase-1-serialization-layer.md) | Emit/read the format from R & Python runs | ✅ Done |
 | [2 — Pipeline engine](phase-2-pipeline-engine.md) | Two-node join via value injection (API/CLI) | ✅ Done (core; live Docker/R run still to verify) |
 | [3 — UI & DAG](phase-3-ui-and-dag.md) | N-node join builder, validation, provenance | ✅ Done (drag-and-drop node-graph canvas) |
-| [4 — Packaging](phase-4-packaging.md) | Persist/share a pipeline; composite FSKX | ✅ Done (plain-zip `.fskxp`; OMEX manifest is a TODO) |
+| [4 — Packaging](phase-4-packaging.md) | Persist/share a pipeline; composite FSKX | ✅ Done (COMBINE/OMEX-conformant `.fskxp` w/ `manifest.xml` + `metadata.rdf`) |
 
 > **Latest:** the edge-table builder grew into a full **drag-and-drop node-graph canvas** in
 > `app/templates/join.html` — draggable boxes with input/output ports, drawn bezier edges
