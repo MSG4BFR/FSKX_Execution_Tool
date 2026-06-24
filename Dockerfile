@@ -11,9 +11,11 @@
 
 FROM mambaorg/micromamba:1.5.10
 
-# Base env: the web server + HTTP client (for the repository and the Claude API).
+# Base env: the web server + HTTP client (for the repository and the Claude/local API).
+# pypdf lets the chat feature extract a paper's text for local models, which (unlike
+# Claude) can't take a native PDF document block.
 RUN micromamba install -y -n base -c conda-forge \
-        python=3.11 flask=3.* requests curl tar && \
+        python=3.11 flask=3.* requests curl tar pypdf && \
     micromamba clean --all --yes
 
 # Docker CLI (client only) so the app can build/run per-model images against the host

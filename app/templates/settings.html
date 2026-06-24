@@ -10,16 +10,17 @@
   <div class="container">
     <a class="back" href="{{ url_for('index') }}">← All models</a>
     <header class="top"><h1>Settings</h1></header>
-    <p class="sub">Used only for the AI-assisted environment builder. A key entered here is
-    kept in memory for this session only. To avoid re-entering it each launch, put it in a
-    <code>.env</code> file next to <code>run.sh</code> (<code>ANTHROPIC_API_KEY=sk-ant-…</code>)
-    — see <code>.env.example</code>; the launcher loads it automatically.</p>
+    <p class="sub">Used by the AI features (the environment builder and "Talk to your model").
+    You can use Anthropic's Claude or a local OpenAI-compatible server such as LM Studio.
+    Settings entered here are kept in memory for this session only. To make them persistent,
+    put them in a <code>.env</code> file next to <code>run.sh</code> — see
+    <code>.env.example</code>; the launcher loads it automatically.</p>
 
     {% if saved %}<div class="card"><span class="ok">✓ Saved.</span></div>{% endif %}
 
     {% if api_key_status %}
     <div class="card">
-      <div class="note">Claude API key:
+      <div class="note">AI backend:
         {% if api_key_valid %}<span class="ok">✓ {{ api_key_status }}</span>
         {% elif api_key_valid is none %}<span>⋯ {{ api_key_status }}</span>
         {% else %}<span class="err">✗ {{ api_key_status }}</span>{% endif %}
@@ -29,6 +30,18 @@
 
     <form method="post">
       <fieldset>
+        <legend>AI backend</legend>
+        <div class="field">
+          <label for="provider">Provider</label>
+          <div class="meta">Which backend the AI features call.</div>
+          <select id="provider" name="provider">
+            <option value="anthropic" {{ 'selected' if settings.provider != 'local' else '' }}>Anthropic Claude (cloud)</option>
+            <option value="local" {{ 'selected' if settings.provider == 'local' else '' }}>Local model (LM Studio / OpenAI-compatible)</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <fieldset id="claudeSection">
         <legend>Claude API</legend>
         <div class="field">
           <label for="api_key">Anthropic API key</label>
@@ -42,9 +55,44 @@
           <input type="text" id="model_id" name="model_id"
                  value="{{ settings.model_id }}" spellcheck="false">
         </div>
-        <button class="btn" type="submit">Save</button>
       </fieldset>
+
+      <fieldset id="localSection">
+        <legend>Local model (LM Studio)</legend>
+        <div class="field">
+          <label for="local_url">API endpoint</label>
+          <div class="meta">OpenAI-compatible base URL ending in <code>/v1</code>. Because the
+          app runs in Docker, use <code>host.docker.internal</code> (not <code>localhost</code>),
+          e.g. <code>http://host.docker.internal:1234/v1</code>.</div>
+          <input type="text" id="local_url" name="local_url"
+                 value="{{ settings.local_url }}"
+                 placeholder="http://host.docker.internal:1234/v1" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="local_model">Model id</label>
+          <div class="meta">The model loaded in LM Studio, e.g. <code>google/gemma-3-27b</code>.</div>
+          <input type="text" id="local_model" name="local_model"
+                 value="{{ settings.local_model }}" spellcheck="false">
+        </div>
+      </fieldset>
+
+      <button class="btn" type="submit">Save</button>
     </form>
+
+    <script>
+      (function () {
+        var sel = document.getElementById("provider");
+        var claude = document.getElementById("claudeSection");
+        var local = document.getElementById("localSection");
+        function sync() {
+          var isLocal = sel.value === "local";
+          claude.style.display = isLocal ? "none" : "";
+          local.style.display = isLocal ? "" : "none";
+        }
+        sel.addEventListener("change", sync);
+        sync();
+      })();
+    </script>
 
     <div class="card">
       <div class="note">Docker backend (needed for AI-built environments):

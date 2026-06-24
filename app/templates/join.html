@@ -1,0 +1,1381 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Join models — FSKX Runner</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    .container.builder { max-width: 1180px; }
+    .builder section { margin: 22px 0; }
+    .builder h2 { font-size: 1.05rem; margin: 0 0 6px; }
+    .toolbar { display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+    .toolbar .col { display:flex; flex-direction:column; gap:3px; }
+    .toolbar label { font-size:.72rem; color:var(--muted); }
+    .row-line { display:flex; align-items:flex-end; gap:8px; flex-wrap:wrap;
+      padding:10px; border:1px solid var(--border); border-radius:10px; margin-bottom:8px;
+      background:var(--panel); }
+    .row-line .col { display:flex; flex-direction:column; gap:2px; }
+    .row-line label { font-size:.72rem; color:var(--muted); }
+    .row-line select, .row-line input { padding:6px 8px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); border-radius:7px; font-size:.85rem; }
+    .arrow { font-size:1.2rem; color:var(--accent); padding:0 2px 4px; }
+    .xbtn { border:none; background:rgba(255,107,107,.14); color:var(--bad); border-radius:7px;
+      cursor:pointer; padding:6px 11px; font-size:.85rem; }
+    .xbtn:hover { background:rgba(255,107,107,.24); }
+    .tf-extra { display:flex; gap:6px; }
+    .msg-err { color:var(--bad); } .msg-warn { color:var(--warn); } .ok { color:var(--good); }
+    .nodestat { display:flex; align-items:center; gap:8px; padding:6px 0; }
+    .pill { font-size:.72rem; border-radius:10px; padding:1px 9px; }
+    .pill.pending{background:var(--panel2);color:var(--muted)}
+    .pill.start{background:rgba(255,200,87,.16);color:var(--warn)}
+    .pill.done{background:rgba(76,208,122,.16);color:var(--good)}
+    .pill.failed{background:rgba(255,107,107,.16);color:var(--bad)}
+    .hint { color:var(--muted); font-size:.8rem; }
+    .ptable { border-collapse:collapse; width:100%; font-size:.85rem; }
+    .ptable th, .ptable td { border:1px solid var(--border); padding:5px 8px; text-align:left; }
+    .ptable th { background:var(--panel2); color:var(--muted); }
+    .params { width:100%; margin-top:6px; }
+    .prow { display:flex; align-items:center; gap:8px; padding:3px 0; flex-wrap:wrap; }
+    .prow label { min-width:200px; font-size:.82rem; }
+    .prow input { padding:5px 7px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); border-radius:7px; font-size:.82rem; }
+    .prow input[readonly] { background:var(--bg); color:var(--accent); font-style:italic; }
+    .pclass { font-size:.68rem; color:var(--muted); }
+    .bound-note { font-size:.72rem; color:var(--accent); }
+    .node-id { font-family:ui-monospace,monospace; background:var(--panel2); color:var(--accent);
+      border:1px solid var(--border); border-radius:5px; padding:1px 6px; }
+    .node-card { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+
+    /* ---------- node-graph canvas ---------- */
+    #canvasWrap { position:relative; }
+    #canvasWrap.maximized { position:fixed; inset:10px; z-index:1000; background:var(--bg);
+      border:1px solid var(--border); border-radius:14px; padding:10px;
+      display:flex; flex-direction:column; box-shadow:0 20px 60px rgba(0,0,0,.6); }
+    #canvasWrap.maximized #canvas { flex:1; height:auto; resize:none; }
+    #canvasWrap.maximized #edgePanel { flex:none; }
+    #canvas {
+      position:relative; height:560px; overflow:hidden;
+      border:1px solid var(--border); border-radius:14px;
+      background:
+        radial-gradient(circle at center, rgba(255,255,255,.05) 1px, transparent 1.4px) 0 0 / 22px 22px,
+        var(--bg);
+      touch-action:none; user-select:none; cursor:grab;
+    }
+    #canvas.panning { cursor:grabbing; }
+    #world { position:absolute; left:0; top:0; transform-origin:0 0; }
+    #wires { position:absolute; left:0; top:0; pointer-events:none; overflow:visible; }
+    #wires path.wire { fill:none; stroke:var(--muted); stroke-width:2.2; opacity:.85; transition:stroke .12s; }
+    #wires path.wire.sel { stroke:var(--accent); stroke-width:3; opacity:1; }
+    #wires path.wire-hit { fill:none; stroke:transparent; stroke-width:16; pointer-events:stroke; cursor:pointer; }
+    #canvasNodes { position:absolute; left:0; top:0; }
+    /* ghost overlay: subtle dotted echo of a wire where a node box hides it */
+    #wiresTop { position:absolute; left:0; top:0; pointer-events:none; overflow:visible; z-index:3; }
+    #wiresTop path.wire-ghost { fill:none; stroke:var(--muted); stroke-width:1.8; opacity:.6;
+      stroke-dasharray:1 5; stroke-linecap:round; }
+    #wiresTop path.wire-ghost.sel { stroke:var(--accent); opacity:.95; }
+    #canvasEmpty { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      color:var(--muted); font-size:.9rem; text-align:center; padding:0 30px; }
+
+    .zoombar { position:absolute; top:10px; right:10px; z-index:6; display:flex; gap:6px;
+      background:var(--panel); border:1px solid var(--border); border-radius:9px; padding:5px; }
+    .zoombar button { border:none; background:var(--panel2); color:var(--text); cursor:pointer;
+      border-radius:6px; padding:5px 9px; font-size:.85rem; min-width:30px; }
+    .zoombar button:hover { background:var(--accent2); color:#fff; }
+    .zoombar .zlevel { color:var(--muted); font-size:.78rem; display:flex; align-items:center;
+      padding:0 4px; min-width:42px; justify-content:center; }
+    #canvasToast { position:absolute; left:50%; bottom:16px; transform:translateX(-50%); z-index:7;
+      background:rgba(255,107,107,.16); color:var(--bad); border:1px solid rgba(255,107,107,.35);
+      padding:7px 14px; border-radius:9px; font-size:.82rem; opacity:0; transition:opacity .2s;
+      pointer-events:none; }
+    #canvasToast.show { opacity:1; }
+
+    .gnode { position:absolute; width:230px; background:var(--panel);
+      border:1px solid var(--border); border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.35); }
+    .gnode.dragging { box-shadow:0 12px 34px rgba(0,0,0,.5); border-color:var(--accent2); }
+    .ghead { display:flex; align-items:center; gap:7px; padding:8px 10px;
+      border-bottom:1px solid var(--border); cursor:grab;
+      background:linear-gradient(180deg, var(--panel2), var(--panel)); border-radius:12px 12px 0 0; }
+    .ghead:active { cursor:grabbing; }
+    .gstep { font-family:ui-monospace,monospace; font-size:.74rem; font-weight:700; color:#fff;
+      background:var(--accent2); border-radius:50%; width:20px; height:20px; flex:none;
+      display:flex; align-items:center; justify-content:center; }
+    .gname { font-weight:600; font-size:.84rem; line-height:1.2; max-width:150px;
+      display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    .gbadge { font-size:.62rem; padding:1px 6px; border-radius:999px; border:1px solid var(--border);
+      color:var(--muted); flex:none; }
+    .gbadge.python { color:#6cc1ff; border-color:#245; }
+    .gbadge.r { color:#9ad; border-color:#346; }
+    .gspring { flex:1; }
+    .gx { border:none; background:transparent; color:var(--muted); cursor:pointer; font-size:.85rem;
+      padding:2px 4px; border-radius:5px; flex:none; }
+    .gx:hover { color:var(--bad); background:rgba(255,107,107,.14); }
+    .gbody { display:flex; justify-content:space-between; gap:14px; padding:8px 0; }
+    .gcol { display:flex; flex-direction:column; gap:4px; flex:1; min-width:0; }
+    .gcol.out { align-items:flex-end; }
+    .gport { position:relative; display:flex; align-items:center; gap:6px; padding:2px 12px;
+      font-size:.78rem; max-width:100%; }
+    .gcol.out .gport { flex-direction:row; justify-content:flex-end; }
+    .gpl { color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .gdot { width:13px; height:13px; border-radius:50%; flex:none; box-sizing:border-box;
+      border:2px solid var(--bg); cursor:crosshair; transition:transform .1s, box-shadow .1s; }
+    .gport.in  .gdot { position:absolute; left:-6px; background:var(--accent);
+      box-shadow:0 0 0 2px rgba(79,157,255,.25); }
+    .gport.out .gdot { position:absolute; right:-6px; background:#a78bfa;
+      box-shadow:0 0 0 2px rgba(167,139,250,.25); }
+    .gport.in  { padding-left:14px; }
+    .gport.out { padding-right:14px; }
+    .gport.in.bound .gdot { background:var(--good); box-shadow:0 0 0 2px rgba(76,208,122,.3); }
+    .gdot:hover { transform:scale(1.35); }
+    .gport.droptarget .gdot { transform:scale(1.5); box-shadow:0 0 0 4px rgba(79,157,255,.5); }
+    .gp-none { font-size:.7rem; color:var(--muted); padding:2px 12px; font-style:italic; }
+    .gmore { font-size:.7rem; color:var(--accent); cursor:pointer; padding:2px 12px; user-select:none; }
+    .gmore:hover { text-decoration:underline; }
+    .gcol.out .gmore { text-align:right; }
+    .gloading, .gerr { padding:10px 12px; font-size:.78rem; color:var(--muted); }
+    .gerr { color:var(--bad); }
+
+    /* ---- live run status on the canvas (model-joining TODO #3a) ---- */
+    .gnode.run-running { border-color:var(--accent);
+      box-shadow:0 0 0 2px rgba(79,157,255,.32),0 6px 20px rgba(0,0,0,.35);
+      animation:noderun 1.2s ease-in-out infinite; }
+    @keyframes noderun {
+      0%,100% { box-shadow:0 0 0 2px rgba(79,157,255,.30),0 6px 20px rgba(0,0,0,.35); }
+      50%     { box-shadow:0 0 0 7px rgba(79,157,255,.10),0 6px 22px rgba(0,0,0,.40); } }
+    .gnode.run-done   { border-color:#2c5a3c; }
+    .gnode.run-failed { border-color:var(--bad);
+      box-shadow:0 0 0 2px rgba(255,107,107,.32),0 6px 20px rgba(0,0,0,.40); }
+    .gnode.run-blocked { opacity:.5; border-style:dashed; }
+    .gnode.run-skipped { opacity:.45; }
+    .gstat { flex:none; width:18px; height:18px; box-sizing:border-box; display:flex;
+      align-items:center; justify-content:center; font-size:.82rem; font-weight:700; border-radius:50%; }
+    .gstat.run-running { border:2.5px solid var(--border); border-top-color:var(--accent);
+      animation:spin .8s linear infinite; }
+    .gstat.run-done    { color:var(--good); }
+    .gstat.run-failed  { color:var(--bad); }
+    .gstat.run-blocked, .gstat.run-skipped { color:var(--muted); }
+    .gstat a { color:inherit; text-decoration:none; }
+    #wires path.wire.flow { stroke:var(--good); stroke-width:2.6; opacity:1;
+      stroke-dasharray:7 7; animation:flowdash .9s linear infinite; }
+    @keyframes flowdash { to { stroke-dashoffset:-28; } }
+    #wires path.wire.flowdone { stroke:var(--good); opacity:.85; }
+    #wires path.wire.blocked  { stroke:var(--bad); opacity:.32; stroke-dasharray:2 5; }
+    .pill.running { background:rgba(79,157,255,.16); color:var(--accent); }
+    .pill.blocked { background:rgba(255,107,107,.12); color:var(--bad); }
+    .pill.skipped { background:var(--panel2); color:var(--muted); }
+    .pill.cached  { background:rgba(45,212,191,.16); color:#2dd4bf; }
+
+    /* ---- per-node hover actions (Phase B) ---- */
+    .gact { border:none; background:transparent; color:var(--muted); cursor:pointer; flex:none;
+      font-size:.8rem; padding:2px 4px; border-radius:5px; opacity:0; transition:opacity .12s; }
+    .gnode:hover .gact, .gnode.run-running .gact { opacity:1; }
+    .gexec:hover:not(:disabled) { color:var(--good); background:rgba(76,208,122,.14); }
+    .greset:hover { color:var(--warn); background:rgba(255,200,87,.14); }
+    .gact:disabled { opacity:.25; cursor:not-allowed; }
+    .gnode:hover .gact:disabled { opacity:.3; }
+    /* reused-from-cache, shown live during a run */
+    .gnode.run-cached { border-color:#1f6f66; }
+    .gstat.run-cached { color:#2dd4bf; }
+    #wires path.wire.flowcached { stroke:#2dd4bf; opacity:.7; stroke-dasharray:5 6; }
+    /* ---- at-rest persistent state badges (from the plan dry-run) ---- */
+    .gnode.node-clean { border-color:#2c5a3c; }
+    .gnode.node-stale { border-color:var(--warn); box-shadow:0 0 0 1px rgba(255,200,87,.25),0 6px 20px rgba(0,0,0,.35); }
+    .gnode.node-blocked { border-color:var(--bad); }
+    .gstat.node-clean { color:var(--good); }
+    .gstat.node-stale { color:var(--warn); }
+    .gstat.node-blocked { color:var(--bad); }
+
+    .edgepanel { margin-top:12px; padding:12px; border:1px solid var(--accent2); border-radius:10px;
+      background:var(--panel); display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap; }
+    .edgepanel .col { display:flex; flex-direction:column; gap:3px; }
+    .edgepanel label { font-size:.72rem; color:var(--muted); }
+    .edgepanel select, .edgepanel input { padding:6px 8px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); border-radius:7px; font-size:.85rem; }
+    .edgepanel .wire-label { font-family:ui-monospace,monospace; font-size:.82rem; color:var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="container builder">
+    <a class="back" href="{{ url_for('index') }}">← All models</a>
+    <header class="top"><h1>🔗 Join models</h1></header>
+    <p class="sub">Chain model simulations: a downstream model's input is taken from an
+      upstream model's parameter. Add models to the canvas, <strong>drag</strong> the boxes to
+      arrange them, then <strong>draw a connection</strong> by dragging from any output (right,
+      violet) or input (left, blue) port to another model's input port. The numbered badge on
+      each box is its derived <strong>execution step</strong>; loops are not allowed.
+      <span class="hint">Your working draft is kept in this browser —
+      <a href="#" onclick="clearAll();return false;">new / clear</a>.</span></p>
+
+    <!-- SAVED PIPELINES -->
+    <section>
+      <h2>0 · Saved pipelines</h2>
+      <div class="row-line" style="border-style:dashed">
+        <div class="col" style="min-width:240px">
+          <label>Open a saved pipeline</label>
+          <select id="savedPick"><option value="">— none —</option></select>
+        </div>
+        <button class="btn secondary" type="button" onclick="loadPipeline()">Load</button>
+        <button class="xbtn" type="button" onclick="deletePipeline()">Delete</button>
+        <span style="flex:1"></span>
+        <div class="col" style="min-width:200px">
+          <label>Name</label>
+          <input id="pipeName" placeholder="My join pipeline">
+        </div>
+        <button class="btn" type="button" onclick="savePipeline(false)">💾 Save</button>
+        <button class="btn secondary" type="button" onclick="savePipeline(true)">Save as new</button>
+      </div>
+      <div class="row-line" style="border-style:dashed">
+        <span class="hint" id="currentLabel">Unsaved draft.</span>
+        <span style="flex:1"></span>
+        <a class="btn secondary" id="exportBtn" href="#" onclick="return exportPipeline()">⬇ Export (.fskxp)</a>
+        <label class="btn secondary" style="cursor:pointer">⬆ Import
+          <input type="file" accept=".fskxp,.zip" style="display:none" onchange="importPipeline(this)">
+        </label>
+      </div>
+      <div id="saveMsg" class="hint"></div>
+      <div class="row-line" style="border-style:dashed">
+        <div class="col" style="min-width:300px">
+          <label>Saved states — node executions + model runs you saved</label>
+          <select id="runPick"><option value="">— none —</option></select>
+        </div>
+        <button class="btn secondary" type="button" onclick="loadPastRun()">Load</button>
+        <button class="xbtn" type="button" onclick="deletePastRun()">Delete</button>
+        <span style="flex:1"></span>
+        <button class="btn" type="button" onclick="savePastRun()" title="Save the current node executions + model runs as a named snapshot">💾 Save current state</button>
+        <span class="hint" id="runHistMsg"></span>
+      </div>
+    </section>
+
+    <!-- CANVAS -->
+    <section>
+      <h2>1 · Pipeline canvas</h2>
+      <div class="toolbar">
+        <div class="col" style="flex:1;min-width:220px">
+          <label>Add a model as a node</label>
+          <select id="modelPick">
+            {% for m in models %}<option value="{{ m.fskx }}">{{ m.label }}</option>{% endfor %}
+          </select>
+        </div>
+        <button class="btn" type="button" onclick="addNode()">+ Add model</button>
+        <button class="btn secondary" type="button" onclick="autoLayout()">⤢ Auto-layout</button>
+      </div>
+      <div id="canvasWrap">
+        <div id="canvas">
+          <div class="zoombar">
+            <button type="button" title="Zoom out" onclick="zoomBy(1/1.2)">−</button>
+            <span class="zlevel" id="zlevel">100%</span>
+            <button type="button" title="Zoom in" onclick="zoomBy(1.2)">+</button>
+            <button type="button" title="Fit all" onclick="fitView()">Fit</button>
+            <button type="button" title="Fullscreen" id="maxBtn" onclick="toggleMax()">⛶</button>
+          </div>
+          <div id="world">
+            <svg id="wires" width="100%" height="100%">
+              <defs>
+                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7"
+                        orient="auto-start-reverse">
+                  <path d="M0,0 L10,5 L0,10 z" fill="#9aa3b4"></path>
+                </marker>
+              </defs>
+            </svg>
+            <div id="canvasNodes"></div>
+            <svg id="wiresTop" width="100%" height="100%"></svg>
+          </div>
+          <div id="canvasEmpty">No models yet. Pick one above and “+ Add model”.<br>
+            The same model can be added twice — each instance is its own node.</div>
+          <div id="canvasToast"></div>
+        </div>
+        <div id="edgePanel"></div>
+      </div>
+    </section>
+
+    <!-- SHARED -->
+    <section>
+      <details id="sharedDetails">
+        <summary><strong>2 · Shared constants</strong> <span class="hint">(optional —
+          one value fed to one or more inputs, no run-order dependency)</span></summary>
+        <div style="margin-top:10px">
+          <button class="btn secondary" type="button" onclick="addShared()">+ Add constant</button>
+          <div id="shared" style="margin-top:10px"></div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ACTIONS -->
+    <section>
+      <button class="btn secondary" type="button" onclick="doValidate()">Validate</button>
+      <button class="btn" type="button" onclick="doRun(false)" title="Runs only stale nodes; reuses valid caches">▶ Run pipeline</button>
+      <button class="btn secondary" type="button" onclick="doRun(true)" title="Ignore caches and re-run every node from scratch">↻ Force re-run all</button>
+      <span class="hint" style="margin-left:8px">Run executes only what changed. Hover a node to <b>▶ execute up to it</b> or <b>↺ reset</b> it.</span>
+      <div id="validation" style="margin-top:12px"></div>
+    </section>
+
+    <!-- ADVANCED (precise editors) -->
+    <section>
+      <details id="advDetails">
+        <summary><strong>Advanced editor</strong> <span class="hint">— set parameter values per
+          node, and edit connections / transforms as a table</span></summary>
+        <div style="margin-top:14px">
+          <h2 style="font-size:.95rem">Parameter values</h2>
+          <div id="nodes"></div>
+          <p class="hint" id="nodesEmpty">No nodes yet.</p>
+
+          <h2 style="font-size:.95rem;margin-top:18px">Connections (table)</h2>
+          <button class="btn secondary" type="button" onclick="addEdge()">+ Add connection</button>
+          <div id="edges" style="margin-top:10px"></div>
+        </div>
+      </details>
+    </section>
+
+    <!-- RUN -->
+    <section id="runSection" style="display:none">
+      <h2>Run</h2>
+      <div id="runMsg" class="statusline"><span class="spinner"></span> <span>Starting…</span></div>
+      <div id="nodeStates"></div>
+      <div id="provenance" style="margin-top:14px"></div>
+    </section>
+  </div>
+
+<script>
+const MODELS = {{ models|tojson }};
+let nodes = [], edges = [], shared = [], seq = 0;
+let currentId = null, currentName = '';
+let selectedEdge = null;
+let zoom = 1, panX = 0, panY = 0;
+let stepOf = {};   // node id -> execution step (1-based), recomputed each render
+let runState = null;  // live pipeline run status: {map:{id->state}, failed, finished, results}
+let liveRun = false;  // true while a run/execute job is polling (gates plan refreshes)
+let canvasRunMode = false;  // true when the canvas should show runState (live run or history replay) instead of plan badges
+let nodePlan = {};    // nid -> 'reuse'|'run'|'blocked' (at-rest, from the plan dry-run)
+let nodeExec = {};    // nid -> {run_id, ok, fskx} (which nodes have a cached execution)
+let draftId = null;   // stable id for the unsaved scratch workflow (this browser)
+let nodeStateTimer = null;
+
+// ---- working-draft persistence (this browser) ----
+function saveState(){
+  try { localStorage.setItem('fskx_join',
+        JSON.stringify({nodes, edges, shared, seq, currentId, currentName,
+                        view:{zoom, panX, panY}})); } catch(e){}
+  scheduleNodeStateRefresh();  // config/wiring may have changed → refresh stale/clean badges
+}
+function loadState(){
+  try {
+    const s = JSON.parse(localStorage.getItem('fskx_join') || 'null');
+    if(s){ nodes=s.nodes||[]; edges=s.edges||[]; shared=s.shared||[]; seq=s.seq||0;
+           currentId=s.currentId||null; currentName=s.currentName||'';
+           if(s.view){ zoom=s.view.zoom||1; panX=s.view.panX||0; panY=s.view.panY||0; } }
+  } catch(e){}
+}
+function clearAll(){
+  if(!confirm('Start a new (empty) join? Your saved pipelines are not affected.')) return;
+  nodes=[]; edges=[]; shared=[]; seq=0; currentId=null; currentName=''; selectedEdge=null;
+  zoom=1; panX=0; panY=0; runState=null; canvasRunMode=false; nodePlan={}; nodeExec={};
+  document.getElementById('runSection').style.display='none';
+  localStorage.removeItem('fskx_join');
+  document.getElementById('pipeName').value='';
+  renderAll();
+}
+function renderAll(){ computeOrder(); renderCanvas(); renderNodes(); renderEdges(); renderShared();
+  renderEdgePanel(); updateCurrentLabel(); saveState(); }
+function updateCurrentLabel(){
+  const el = document.getElementById('currentLabel');
+  if(el) el.textContent = currentId ? ('Editing saved pipeline: “'+currentName+'”.') : 'Unsaved draft.';
+  const ex = document.getElementById('exportBtn');
+  if(ex) ex.style.opacity = currentId ? '1' : '.5';
+}
+
+// ---- saved (server-side) pipelines ----
+function flash(msg){ const m=document.getElementById('saveMsg'); if(m){ m.textContent=msg;
+  setTimeout(()=>{ if(m.textContent===msg) m.textContent=''; }, 4000); } }
+function refreshSaved(sel){
+  fetch('/api/pipelines').then(r=>r.json()).then(list=>{
+    const s = document.getElementById('savedPick');
+    s.innerHTML = '<option value="">— none —</option>' + list.map(p=>
+      `<option value="${p.id}" ${p.id===(sel||currentId)?'selected':''}>${p.name} · ${p.n_nodes} nodes, ${p.n_edges} edges</option>`).join('');
+  });
+}
+function savePipeline(asNew){
+  const name = (document.getElementById('pipeName').value||'').trim() || currentName || 'Untitled pipeline';
+  const body = {name, pipeline: buildPipeline()};
+  if(!asNew && currentId) body.id = currentId;
+  fetch('/api/pipelines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ flash('✕ '+d.error); return; }
+      currentId=d.id; currentName=d.name; saveState(); updateCurrentLabel();
+      refreshSaved(d.id); flash('💾 Saved “'+d.name+'”.');
+    });
+}
+function loadPipeline(){
+  const id = document.getElementById('savedPick').value;
+  if(!id) return;
+  fetch('/api/pipelines/'+id).then(r=>r.json()).then(loadRecord);
+}
+function loadRecord(rec){
+  const p = rec.pipeline||{};
+  currentId=rec.id; currentName=rec.name; selectedEdge=null; runState=null; canvasRunMode=false;
+  document.getElementById('runSection').style.display='none';
+  document.getElementById('pipeName').value=rec.name||'';
+  nodes=[]; edges=[]; shared=[]; let maxSeq=0;
+  (p.nodes||[]).forEach(n=>{
+    const m = MODELS.find(x=>x.fskx===n.fskx)||{};
+    nodes.push({id:n.id, fskx:n.fskx, label:m.label||n.fskx, name:null, language:null,
+                params:null, fields:null, values:Object.assign({}, n.params||{}), error:null,
+                x:(n.x!=null?n.x:null), y:(n.y!=null?n.y:null), expand:{}});
+    const num=parseInt(String(n.id).replace(/\D/g,''),10); if(num>maxSeq) maxSeq=num;
+  });
+  seq=maxSeq;
+  (p.edges||[]).forEach(e=>{
+    const row={src_node:e.source.node,src_param:e.source.param,
+               tgt_node:e.target.node,tgt_param:e.target.param,tf:'none',scale:'',offset:'',expr:''};
+    if(e.transform){
+      if(e.transform.expression){ row.tf='expression'; row.expr=e.transform.expression; }
+      else { row.tf='affine';
+        if('scale' in e.transform) row.scale=e.transform.scale;
+        if('offset' in e.transform) row.offset=e.transform.offset; }
+    }
+    edges.push(row);
+  });
+  (p.shared||[]).forEach(s=>{ (s.targets||[]).forEach(t=>{
+    shared.push({value:String(s.value), dataType:s.dataType||'DOUBLE', node:t.node, param:t.param}); }); });
+  nodes.forEach(ensurePos);
+  renderAll();
+  // re-fetch each model's ports + fields, then fit the view
+  let pending = nodes.length;
+  nodes.forEach(node=>{
+    fetch('/api/model-params/'+encodeURIComponent(node.fskx)).then(r=>r.json()).then(d=>{
+      if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields; }
+      else node.error=d.error||'could not read model';
+      renderAll();
+      if(--pending<=0) requestAnimationFrame(fitView);
+    });
+  });
+  flash('Loaded “'+rec.name+'”.');
+}
+function deletePipeline(){
+  const id = document.getElementById('savedPick').value;
+  if(!id) return;
+  if(!confirm('Delete this saved pipeline?')) return;
+  fetch('/api/pipelines/'+id+'/delete',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(currentId===id){ currentId=null; currentName=''; }
+    updateCurrentLabel(); refreshSaved(); flash('Deleted.');
+  });
+}
+function exportPipeline(){
+  if(!currentId){ flash('Save the pipeline first, then export.'); return false; }
+  window.location = '/api/pipelines/'+currentId+'/export';
+  return false;
+}
+function importPipeline(input){
+  const f = input.files[0]; if(!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  fetch('/api/pipelines/import',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    input.value='';
+    if(d.error){ flash('✕ '+d.error); return; }
+    refreshSaved(d.id); flash('Imported “'+d.name+'”. Select it above and Load.');
+  });
+}
+
+// ---- bound-port map (which target inputs are driven by an edge / shared const) ----
+function boundMap(){
+  const m = {};
+  edges.forEach(e=>{
+    if(e.tgt_node && e.tgt_param){
+      let d = `${stepLabel(e.src_node)}.${e.src_param||'?'}`;
+      if(e.tf==='affine' && (e.scale||e.offset)) d += ` ×${e.scale||1}${e.offset?('+'+e.offset):''}`;
+      else if(e.tf==='expression' && e.expr) d += ` [${e.expr}]`;
+      m[e.tgt_node+':'+e.tgt_param] = d;
+    }
+  });
+  shared.forEach(s=>{ if(s.node && s.param) m[s.node+':'+s.param] = 'shared constant'; });
+  return m;
+}
+function isConnected(nodeId, paramId){
+  return edges.some(e=>(e.src_node===nodeId&&e.src_param===paramId)
+                     ||(e.tgt_node===nodeId&&e.tgt_param===paramId));
+}
+
+// ============================================================================
+//  EXECUTION ORDER + CYCLE GUARD  (mirrors pipeline.topo_order)
+// ============================================================================
+function computeOrder(){
+  const ids = nodes.map(n=>n.id);
+  const deps = {}; ids.forEach(id=>deps[id]=new Set());
+  edges.forEach(e=>{ if(deps[e.tgt_node] && deps[e.src_node]!==undefined) deps[e.tgt_node].add(e.src_node); });
+  const order=[], seen=new Set();
+  const xOf = id => { const n=nodes.find(z=>z.id===id); return n?(n.x||0):0; };
+  let guard = ids.length+1;
+  while(order.length<ids.length && guard-->0){
+    const ready = ids.filter(id=>!seen.has(id) && [...deps[id]].every(d=>seen.has(d)));
+    if(!ready.length) break;  // cycle (shouldn't happen — creation is blocked)
+    ready.sort((a,b)=> xOf(a)-xOf(b) || a.localeCompare(b));
+    ready.forEach(id=>{ order.push(id); seen.add(id); });
+  }
+  // any leftovers (cyclic) get appended so they still render
+  ids.forEach(id=>{ if(!seen.has(id)) order.push(id); });
+  stepOf = {}; order.forEach((id,i)=>stepOf[id]=i+1);
+  return order;
+}
+function stepLabel(id){ return '#'+(stepOf[id]||'?'); }
+// would adding src->tgt create a cycle? (true if tgt can already reach src)
+function reachable(from, to){
+  if(from===to) return true;
+  const adj={}; nodes.forEach(n=>adj[n.id]=[]);
+  edges.forEach(e=>{ if(adj[e.src_node]) adj[e.src_node].push(e.tgt_node); });
+  const stack=[from], seen=new Set();
+  while(stack.length){ const x=stack.pop(); if(x===to) return true;
+    if(seen.has(x)) continue; seen.add(x); (adj[x]||[]).forEach(y=>stack.push(y)); }
+  return false;
+}
+
+// ============================================================================
+//  NODE-GRAPH CANVAS
+// ============================================================================
+function ensurePos(n){
+  if(n.x==null || n.y==null){
+    const k = nodes.indexOf(n); const i = k<0 ? nodes.length : k;
+    n.x = 40 + (i % 3) * 300;
+    n.y = 40 + Math.floor(i / 3) * 240;
+  }
+  if(!n.expand) n.expand = {};
+}
+function isInput(p){ return ['INPUT','CONSTANT'].includes((p.classification||'').toUpperCase()); }
+const PORT_CAP = 6;
+
+function autoLayout(){
+  const depth = {}; nodes.forEach(n=>depth[n.id]=0);
+  for(let pass=0; pass<nodes.length; pass++){
+    edges.forEach(e=>{
+      if(depth[e.src_node]!=null && depth[e.tgt_node]!=null)
+        depth[e.tgt_node] = Math.max(depth[e.tgt_node], depth[e.src_node]+1);
+    });
+  }
+  const perCol = {};
+  nodes.forEach(n=>{
+    const d = depth[n.id]||0; perCol[d] = (perCol[d]||0);
+    n.x = 40 + d*320; n.y = 40 + perCol[d]*250; perCol[d]++;
+  });
+  renderAll();
+  requestAnimationFrame(fitView);
+}
+
+function visiblePorts(node, list, col){
+  if(list.length<=PORT_CAP || node.expand[col]) return {ports:list, hidden:0, expanded:node.expand[col]};
+  const keep = new Set(list.filter(p=>isConnected(node.id,p.id)).map(p=>p.id));
+  for(const p of list){ if(keep.size>=PORT_CAP) break; keep.add(p.id); }
+  const ports = list.filter(p=>keep.has(p.id));
+  return {ports, hidden:list.length-ports.length, expanded:false};
+}
+function toggleExpand(nodeId, col){
+  const n = nodes.find(x=>x.id===nodeId); if(!n) return;
+  n.expand[col] = !n.expand[col]; renderAll();
+}
+
+function renderCanvas(){
+  const layer = document.getElementById('canvasNodes');
+  document.getElementById('canvasEmpty').style.display = nodes.length ? 'none':'flex';
+  layer.innerHTML='';
+  const bm = boundMap();
+  nodes.forEach(n=>{
+    ensurePos(n);
+    const box = document.createElement('div');
+    box.className='gnode'; box.style.left=n.x+'px'; box.style.top=n.y+'px';
+    box.dataset.node=n.id;
+    const lang = n.language && n.language!=='?'
+      ? `<span class="gbadge ${n.language}">${n.language.toUpperCase()}</span>` : '';
+    let body;
+    if(n.params){
+      const ins = n.params.filter(isInput), outs = n.params.filter(p=>!isInput(p));
+      const vi = visiblePorts(n, ins, 'in'), vo = visiblePorts(n, outs, 'out');
+      const portRow = (p,dir)=>{
+        const bound = dir==='in' && bm[n.id+':'+p.id];
+        const tip = `${p.dataType||'?'}${p.unit&&p.unit!=='[]'?(' · '+p.unit):''} · ${p.classification||''}`;
+        return dir==='in'
+          ? `<div class="gport in ${bound?'bound':''}" data-port="${n.id}|${p.id}|in" title="${tip}">
+               <span class="gdot"></span><span class="gpl">${p.name||p.id}</span></div>`
+          : `<div class="gport out" data-port="${n.id}|${p.id}|out" title="${tip}">
+               <span class="gpl">${p.name||p.id}</span><span class="gdot"></span></div>`;
+      };
+      const moreBtn = (v,col,label)=> v.hidden>0
+        ? `<div class="gmore" onclick="toggleExpand('${n.id}','${col}')">+ ${v.hidden} more…</div>`
+        : (v.expanded && list_len(n,col)>PORT_CAP
+            ? `<div class="gmore" onclick="toggleExpand('${n.id}','${col}')">show fewer</div>` : '');
+      const inRows = (vi.ports.length ? vi.ports.map(p=>portRow(p,'in')).join('') : '<div class="gp-none">no inputs</div>') + moreBtn(vi,'in');
+      const outRows = (vo.ports.length ? vo.ports.map(p=>portRow(p,'out')).join('') : '<div class="gp-none">no outputs</div>') + moreBtn(vo,'out');
+      body = `<div class="gbody"><div class="gcol in">${inRows}</div>
+              <div class="gcol out">${outRows}</div></div>`;
+    } else {
+      body = n.error ? `<div class="gerr">${n.error}</div>` : `<div class="gloading">loading…</div>`;
+    }
+    box.innerHTML = `<div class="ghead"><span class="gstep" title="execution step">${stepOf[n.id]||'?'}</span>
+      <span class="gname" title="${(n.name||n.label||'').replace(/"/g,'&quot;')}">${n.name||n.label}</span>${lang}
+      <span class="gspring"></span>
+      <span class="gstat"></span>
+      <button class="gact gexec" title="Execute up to here (run this node + any stale upstream)">▶</button>
+      <button class="gact greset" title="Reset this node and everything downstream">↺</button>
+      <button class="gx" title="remove">✕</button></div>${body}`;
+    layer.appendChild(box);
+
+    const head = box.querySelector('.ghead');
+    head.addEventListener('pointerdown', ev=>{
+      if(ev.target.closest('.gx') || ev.target.closest('.gact')) return;
+      beginNodeDrag(ev, box, n);
+    });
+    box.querySelector('.gx').addEventListener('click', ()=>removeNode(n.id));
+    box.querySelector('.gexec').addEventListener('click', ev=>{ ev.stopPropagation(); executeNode(n.id); });
+    box.querySelector('.greset').addEventListener('click', ev=>{ ev.stopPropagation(); resetNode(n.id); });
+    box.querySelectorAll('.gport .gdot').forEach(dot=>{
+      const port = dot.closest('.gport');
+      const [nid, pid, dir] = port.dataset.port.split('|');
+      dot.addEventListener('pointerdown', ev=>beginConnect(ev, nid, pid, dir));
+    });
+  });
+  applyTransform();
+  paintNodes();
+}
+function list_len(n,col){ if(!n.params) return 0;
+  return n.params.filter(p=> col==='in' ? isInput(p) : !isInput(p)).length; }
+
+// world<->screen helpers (account for pan/zoom transform on #world)
+function worldPoint(clientX, clientY){
+  const r = document.getElementById('canvas').getBoundingClientRect();
+  return { x:(clientX - r.left - panX)/zoom, y:(clientY - r.top - panY)/zoom };
+}
+function portCenter(dotEl){
+  const d = dotEl.getBoundingClientRect();
+  return worldPoint(d.left + d.width/2, d.top + d.height/2);
+}
+function bez(a,b){
+  const dx = Math.max(45, Math.abs(b.x-a.x)*0.5);
+  return `M${a.x},${a.y} C${a.x+dx},${a.y} ${b.x-dx},${b.y} ${b.x},${b.y}`;
+}
+function applyTransform(){
+  document.getElementById('world').style.transform =
+    `translate(${panX}px,${panY}px) scale(${zoom})`;
+  const z = document.getElementById('zlevel'); if(z) z.textContent = Math.round(zoom*100)+'%';
+}
+function resizeSvg(){
+  const c = document.getElementById('canvas');
+  let w = c.clientWidth/zoom, h = c.clientHeight/zoom;
+  document.querySelectorAll('#canvasNodes .gnode').forEach(b=>{
+    w = Math.max(w, b.offsetLeft + b.offsetWidth + 200);
+    h = Math.max(h, b.offsetTop + b.offsetHeight + 200);
+  });
+  ['wires','wiresTop'].forEach(id=>{
+    const svg = document.getElementById(id);
+    if(svg){ svg.setAttribute('width', w); svg.setAttribute('height', h); }
+  });
+}
+// cubic-bezier point at t, with the same control points bez() uses
+function cubicPt(p0,c1,c2,p1,t){
+  const u=1-t, a=u*u*u, b=3*u*u*t, c=3*u*t*t, d=t*t*t;
+  return {x:a*p0.x+b*c1.x+c*c2.x+d*p1.x, y:a*p0.y+b*c1.y+c*c2.y+d*p1.y};
+}
+// the contiguous runs of a wire that pass *under* some node box (so we can echo them dotted)
+function ghostSegments(a, b, rects){
+  const dx = Math.max(45, Math.abs(b.x-a.x)*0.5);
+  const c1={x:a.x+dx,y:a.y}, c2={x:b.x-dx,y:b.y}, N=80, inset=2;
+  const segs=[]; let cur=null;
+  for(let i=0;i<=N;i++){
+    const p = cubicPt(a,c1,c2,b,i/N);
+    const hidden = rects.some(r=> p.x>r.l+inset && p.x<r.r-inset && p.y>r.t+inset && p.y<r.b-inset);
+    if(hidden){ if(!cur){ cur=[]; segs.push(cur); } cur.push(p); }
+    else cur=null;
+  }
+  return segs;
+}
+function drawWires(){
+  const svg = document.getElementById('wires'), top = document.getElementById('wiresTop');
+  resizeSvg();
+  svg.querySelectorAll('path.wire, path.wire-hit').forEach(p=>p.remove());
+  if(top) top.querySelectorAll('path.wire-ghost').forEach(p=>p.remove());
+  const rects = [...document.querySelectorAll('#canvasNodes .gnode')].map(b=>(
+    {l:b.offsetLeft, t:b.offsetTop, r:b.offsetLeft+b.offsetWidth, b:b.offsetTop+b.offsetHeight}));
+  edges.forEach((e,i)=>{
+    const s = document.querySelector(`[data-port="${e.src_node}|${e.src_param}|out"] .gdot`)
+           || document.querySelector(`[data-port="${e.src_node}|${e.src_param}|in"] .gdot`);
+    const t = document.querySelector(`[data-port="${e.tgt_node}|${e.tgt_param}|in"] .gdot`);
+    if(!s || !t) return;  // an endpoint is collapsed/missing — connected ports are always shown, so rare
+    const a = portCenter(s), b = portCenter(t), d = bez(a, b);
+    const hit = document.createElementNS('http://www.w3.org/2000/svg','path');
+    hit.setAttribute('d', d); hit.setAttribute('class','wire-hit');
+    hit.addEventListener('click', ()=>selectEdge(i));
+    const w = document.createElementNS('http://www.w3.org/2000/svg','path');
+    w.setAttribute('d', d); w.setAttribute('class','wire'+(i===selectedEdge?' sel':''));
+    w.setAttribute('marker-end','url(#arrow)');
+    w.dataset.ei = i;
+    if(canvasRunMode && runState){
+      const ss = runState.map[e.src_node], ts = runState.map[e.tgt_node];
+      if(ts==='blocked' || ts==='skipped') w.classList.add('blocked');
+      else if(ss==='cached') w.classList.add('flowcached');
+      else if(ss==='done') w.classList.add(runState.finished ? 'flowdone' : 'flow');
+    }
+    svg.appendChild(hit); svg.appendChild(w);
+    // dotted echo over any node box that hides this wire
+    if(top) ghostSegments(a, b, rects).forEach(seg=>{
+      if(seg.length<2) return;
+      const g = document.createElementNS('http://www.w3.org/2000/svg','path');
+      g.setAttribute('d', 'M'+seg.map(p=>p.x+','+p.y).join(' L'));
+      g.setAttribute('class','wire-ghost'+(i===selectedEdge?' sel':''));
+      top.appendChild(g);
+    });
+  });
+}
+
+function beginNodeDrag(e, box, node){
+  e.preventDefault();
+  box.classList.add('dragging');
+  const sx=e.clientX, sy=e.clientY, ox=node.x, oy=node.y;
+  function mv(ev){
+    node.x = Math.max(0, ox + (ev.clientX - sx)/zoom);
+    node.y = Math.max(0, oy + (ev.clientY - sy)/zoom);
+    box.style.left=node.x+'px'; box.style.top=node.y+'px';
+    drawWires();
+  }
+  function up(){
+    document.removeEventListener('pointermove', mv);
+    document.removeEventListener('pointerup', up);
+    box.classList.remove('dragging');
+    computeOrder();  // x-position affects step ordering of parallel nodes
+    renderAll();
+  }
+  document.addEventListener('pointermove', mv);
+  document.addEventListener('pointerup', up);
+}
+
+function beginConnect(e, nodeId, paramId, dir){
+  e.preventDefault(); e.stopPropagation();
+  const svg = document.getElementById('wires');
+  const startDot = document.querySelector(`[data-port="${nodeId}|${paramId}|${dir}"] .gdot`);
+  const start = portCenter(startDot);
+  const top = document.getElementById('wiresTop');
+  const rects = [...document.querySelectorAll('#canvasNodes .gnode')].map(b=>(
+    {l:b.offsetLeft, t:b.offsetTop, r:b.offsetLeft+b.offsetWidth, b:b.offsetTop+b.offsetHeight}));
+  const clearTempGhost = ()=>{ if(top) top.querySelectorAll('path.wire-ghost-temp').forEach(p=>p.remove()); };
+  const temp = document.createElementNS('http://www.w3.org/2000/svg','path');
+  temp.setAttribute('class','wire sel'); svg.appendChild(temp);
+  let hovered = null;
+  function validTarget(n2, d2){ return d2==='in' && n2!==nodeId && !reachable(n2, nodeId); }
+  function mv(ev){
+    const p = worldPoint(ev.clientX, ev.clientY);
+    temp.setAttribute('d', bez(start, p));
+    clearTempGhost();
+    if(top) ghostSegments(start, p, rects).forEach(seg=>{
+      if(seg.length<2) return;
+      const g = document.createElementNS('http://www.w3.org/2000/svg','path');
+      g.setAttribute('d', 'M'+seg.map(q=>q.x+','+q.y).join(' L'));
+      g.setAttribute('class','wire-ghost sel wire-ghost-temp');
+      top.appendChild(g);
+    });
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const port = el && el.closest ? el.closest('.gport') : null;
+    if(hovered && hovered!==port) hovered.classList.remove('droptarget');
+    if(port){
+      const [n2,,d2] = port.dataset.port.split('|');
+      if(validTarget(n2,d2)){ port.classList.add('droptarget'); hovered=port; }
+      else hovered=null;
+    } else hovered=null;
+  }
+  function up(ev){
+    document.removeEventListener('pointermove', mv);
+    document.removeEventListener('pointerup', up);
+    temp.remove(); clearTempGhost();
+    if(hovered) hovered.classList.remove('droptarget');
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const port = el && el.closest ? el.closest('.gport') : null;
+    if(port){
+      const [n2,p2,d2] = port.dataset.port.split('|');
+      if(d2==='in' && n2!==nodeId){
+        if(reachable(n2, nodeId)) toast('Can’t connect: that would create a loop (not supported yet).');
+        else addCanvasEdge(nodeId, paramId, n2, p2);
+      }
+    }
+  }
+  document.addEventListener('pointermove', mv);
+  document.addEventListener('pointerup', up);
+}
+
+function addCanvasEdge(sn, sp, tn, tp){
+  edges = edges.filter(e=>!(e.tgt_node===tn && e.tgt_param===tp)); // one driver per input
+  edges.push({src_node:sn, src_param:sp, tgt_node:tn, tgt_param:tp,
+              tf:'none', scale:'', offset:'', expr:''});
+  selectedEdge = edges.length-1;
+  renderAll();
+}
+function selectEdge(i){ selectedEdge = i; renderAll(); }
+
+function toast(msg){
+  const t = document.getElementById('canvasToast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._tm); t._tm = setTimeout(()=>t.classList.remove('show'), 2600);
+}
+
+// ---- zoom / pan / fit / fullscreen ----
+function zoomBy(f){ zoomAt(f, document.getElementById('canvas').clientWidth/2,
+                            document.getElementById('canvas').clientHeight/2); }
+function zoomAt(f, cx, cy){
+  const r = document.getElementById('canvas').getBoundingClientRect();
+  const wx = (cx - panX)/zoom, wy = (cy - panY)/zoom;
+  zoom = Math.min(2, Math.max(0.25, zoom*f));
+  panX = cx - wx*zoom; panY = cy - wy*zoom;
+  applyTransform(); saveState();
+}
+function fitView(){
+  const boxes = [...document.querySelectorAll('#canvasNodes .gnode')];
+  const c = document.getElementById('canvas');
+  if(!boxes.length){ zoom=1; panX=0; panY=0; applyTransform(); return; }
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  boxes.forEach(b=>{ minX=Math.min(minX,b.offsetLeft); minY=Math.min(minY,b.offsetTop);
+    maxX=Math.max(maxX,b.offsetLeft+b.offsetWidth); maxY=Math.max(maxY,b.offsetTop+b.offsetHeight); });
+  const pad=50, bw=maxX-minX, bh=maxY-minY;
+  const vw=c.clientWidth, vh=c.clientHeight;
+  zoom = Math.min(2, Math.max(0.25, Math.min(vw/(bw+2*pad), vh/(bh+2*pad))));
+  panX = (vw - bw*zoom)/2 - minX*zoom;
+  panY = (vh - bh*zoom)/2 - minY*zoom;
+  applyTransform(); resizeSvg(); saveState();
+}
+function toggleMax(){
+  const wrap = document.getElementById('canvasWrap');
+  wrap.classList.toggle('maximized');
+  document.getElementById('maxBtn').textContent = wrap.classList.contains('maximized') ? '🗗' : '⛶';
+  requestAnimationFrame(()=>{ resizeSvg(); fitView(); });
+}
+// background-drag to pan
+(function(){
+  const c = document.getElementById('canvas');
+  c.addEventListener('pointerdown', e=>{
+    if(e.target.closest('.gnode') || e.target.closest('.zoombar')) return;
+    e.preventDefault(); c.classList.add('panning');
+    const sx=e.clientX, sy=e.clientY, ox=panX, oy=panY;
+    function mv(ev){ panX=ox+(ev.clientX-sx); panY=oy+(ev.clientY-sy); applyTransform(); }
+    function up(){ document.removeEventListener('pointermove',mv);
+      document.removeEventListener('pointerup',up); c.classList.remove('panning'); saveState(); }
+    document.addEventListener('pointermove',mv); document.addEventListener('pointerup',up);
+  });
+  c.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const r = c.getBoundingClientRect();
+    zoomAt(e.deltaY<0 ? 1.1 : 1/1.1, e.clientX-r.left, e.clientY-r.top);
+  }, {passive:false});
+})();
+
+// ---- nodes ----
+function addNode(){
+  const fskx = document.getElementById('modelPick').value;
+  if(!fskx) return;
+  seq += 1;
+  const node = {id:'n'+seq, fskx, label:(MODELS.find(m=>m.fskx===fskx)||{}).label||fskx,
+                name:null, language:null, params:null, fields:null, values:{}, error:null,
+                x:null, y:null, expand:{}};
+  ensurePos(node);
+  nodes.push(node);
+  renderAll();
+  fetch('/api/model-params/'+encodeURIComponent(fskx))
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields; }
+      else { node.error = d.error || 'could not read model'; }
+      renderAll();
+    }).catch(e=>{ node.error=String(e); renderAll(); });
+}
+function removeNode(id){
+  nodes = nodes.filter(n=>n.id!==id);
+  edges = edges.filter(e=>e.src_node!==id && e.tgt_node!==id);
+  shared = shared.filter(s=>s.node!==id);
+  selectedEdge = null;
+  renderAll();
+}
+function setVal(id, fid, v){
+  const n = nodes.find(x=>x.id===id); if(n){ n.values = n.values||{}; n.values[fid]=v; saveState(); }
+}
+function paramEditor(n){
+  if(!n.fields || !n.fields.length) return '<div class="hint">No editable parameters.</div>';
+  const bm = boundMap();
+  let h = '<div class="params">';
+  n.fields.forEach(f=>{
+    const key = n.id+':'+f.id;
+    const unit = f.unit ? ` <span class="pclass">[${f.unit}]</span>` : '';
+    const cls = ` <span class="pclass">· ${f.classification||''}</span>`;
+    if(bm[key]){
+      h += `<div class="prow"><label>${f.label||f.id}${unit}${cls}</label>
+        <input readonly value="from ${bm[key]}">
+        <span class="bound-note">🔒 bound</span></div>`;
+    } else {
+      const val = (n.values && n.values[f.id]!==undefined) ? n.values[f.id] : (f.display!==undefined?f.display:'');
+      h += `<div class="prow"><label>${f.label||f.id}${unit}${cls}</label>
+        <input value="${String(val).replace(/"/g,'&quot;')}" oninput="setVal('${n.id}','${f.id}',this.value)"></div>`;
+    }
+  });
+  return h+'</div>';
+}
+function renderNodes(){
+  const box = document.getElementById('nodes');
+  document.getElementById('nodesEmpty').style.display = nodes.length ? 'none':'block';
+  box.innerHTML = '';
+  nodes.forEach(n=>{
+    const lang = n.language && n.language!=='?' ? `<span class="badge lang-${n.language}">${n.language.toUpperCase()}</span>`:'';
+    const stat = n.params ? `<span class="badge">${n.params.length} parameters</span>`
+                : n.error ? `<span class="badge err">${n.error}</span>` : `<span class="hint">loading…</span>`;
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `<div class="node-card"><span class="node-id">step ${stepOf[n.id]||'?'}</span>
+      <strong>${n.name||n.label}</strong> ${lang} ${stat}
+      <span style="flex:1"></span>
+      <button class="xbtn" onclick="removeNode('${n.id}')">remove</button></div>
+      ${n.fields ? `<details style="margin-top:8px"><summary class="note">Parameters</summary>${paramEditor(n)}</details>`:''}`;
+    box.appendChild(div);
+  });
+}
+
+// ---- port menus (table editor) ----
+function nodeOptions(sel){
+  return nodes.map(n=>`<option value="${n.id}" ${n.id===sel?'selected':''}>#${stepOf[n.id]||'?'} · ${n.name||n.label}</option>`).join('');
+}
+function paramOptions(nodeId, sel, classes){
+  const n = nodes.find(x=>x.id===nodeId);
+  if(!n || !n.params) return '<option value="">(load…)</option>';
+  const ps = n.params.filter(p=>!classes || classes.includes((p.classification||'').toUpperCase()));
+  if(!ps.length) return '<option value="">(none)</option>';
+  return '<option value="">— pick —</option>' + ps.map(p=>{
+    const u = p.unit && p.unit!=='[]' ? ' · '+p.unit : '';
+    const lbl = `${p.name||p.id} (${p.id}) · ${p.dataType||'?'}${u} · ${p.classification||''}`;
+    return `<option value="${p.id}" ${p.id===sel?'selected':''}>${lbl}</option>`;
+  }).join('');
+}
+
+// ---- edges (table editor) ----
+function addEdge(){ edges.push({src_node:'',src_param:'',tgt_node:'',tgt_param:'',tf:'none',scale:'',offset:'',expr:''}); selectedEdge=edges.length-1; renderAll(); }
+function removeEdge(i){ edges.splice(i,1); selectedEdge=null; renderAll(); }
+function edgeField(i,k,v){
+  // guard the table editor against creating a cycle too
+  if((k==='src_node'||k==='tgt_node')){
+    const e = Object.assign({}, edges[i], {[k]:v});
+    if(e.src_node && e.tgt_node && e.src_node!==e.tgt_node && reachable(e.tgt_node, e.src_node)){
+      toast('That wiring would create a loop (not supported yet).');
+      renderAll(); return;
+    }
+  }
+  edges[i][k]=v; renderAll();
+}
+function edgeRaw(i,k,v){
+  edges[i][k]=v;
+  // Keep the two views (canvas edge panel <-> connections table) in sync without a full
+  // re-render, so the input currently being typed in keeps its focus/cursor. Push the new
+  // value into any *sibling* input bound to the same edge field.
+  document.querySelectorAll('[data-ei="'+i+'"][data-ek="'+k+'"]').forEach(function(el){
+    if(el!==document.activeElement && el.value!==v) el.value=v;
+  });
+  drawWires(); saveState();
+}
+function renderEdges(){
+  const box = document.getElementById('edges'); box.innerHTML='';
+  edges.forEach((e,i)=>{
+    const tf = e.tf||'none';
+    const extra = tf==='affine'
+        ? `<div class="tf-extra"><input data-ei="${i}" data-ek="scale" style="width:78px" placeholder="scale" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)">
+           <input data-ei="${i}" data-ek="offset" style="width:78px" placeholder="offset" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
+      : tf==='expression'
+        ? `<input data-ei="${i}" data-ek="expr" style="width:160px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)">` : '';
+    const row = document.createElement('div'); row.className='row-line';
+    if(i===selectedEdge) row.style.borderColor='var(--accent2)';
+    row.innerHTML = `
+      <div class="col"><label>Source node</label>
+        <select onchange="edgeField(${i},'src_node',this.value)"><option value="">— pick —</option>${nodeOptions(e.src_node)}</select></div>
+      <div class="col"><label>Source port (any classification)</label>
+        <select onchange="edgeRaw(${i},'src_param',this.value)">${paramOptions(e.src_node,e.src_param,null)}</select></div>
+      <span class="arrow">→</span>
+      <div class="col"><label>Target node</label>
+        <select onchange="edgeField(${i},'tgt_node',this.value)"><option value="">— pick —</option>${nodeOptions(e.tgt_node)}</select></div>
+      <div class="col"><label>Target input</label>
+        <select onchange="edgeField(${i},'tgt_param',this.value)">${paramOptions(e.tgt_node,e.tgt_param,['INPUT','CONSTANT'])}</select></div>
+      <div class="col"><label>Transform</label>
+        <select onchange="edgeField(${i},'tf',this.value)">
+          <option value="none" ${tf==='none'?'selected':''}>none</option>
+          <option value="affine" ${tf==='affine'?'selected':''}>× scale (+ offset)</option>
+          <option value="expression" ${tf==='expression'?'selected':''}>expression</option>
+        </select></div>
+      <div class="col">${extra?'<label>&nbsp;</label>'+extra:''}</div>
+      <button class="xbtn" onclick="removeEdge(${i})">remove</button>`;
+    box.appendChild(row);
+  });
+}
+
+// ---- shared constants ----
+function addShared(){ shared.push({value:'',dataType:'DOUBLE',node:'',param:''}); renderAll(); }
+function removeShared(i){ shared.splice(i,1); renderAll(); }
+function renderShared(){
+  const box = document.getElementById('shared'); box.innerHTML='';
+  shared.forEach((s,i)=>{
+    const row = document.createElement('div'); row.className='row-line';
+    row.innerHTML = `
+      <div class="col"><label>Value</label><input style="width:120px" value="${s.value}" oninput="shared[${i}].value=this.value;saveState()"></div>
+      <div class="col"><label>Type</label>
+        <select onchange="shared[${i}].dataType=this.value;saveState()">
+          ${['DOUBLE','INTEGER','STRING','BOOLEAN'].map(t=>`<option ${s.dataType===t?'selected':''}>${t}</option>`).join('')}
+        </select></div>
+      <span class="arrow">→</span>
+      <div class="col"><label>Target node</label>
+        <select onchange="shared[${i}].node=this.value;renderAll()"><option value="">— pick —</option>${nodeOptions(s.node)}</select></div>
+      <div class="col"><label>Target input</label>
+        <select onchange="shared[${i}].param=this.value;renderAll()">${paramOptions(s.node,s.param,['INPUT','CONSTANT'])}</select></div>
+      <button class="xbtn" onclick="removeShared(${i})">remove</button>`;
+    box.appendChild(row);
+  });
+}
+
+// ---- selected-edge panel ----
+function renderEdgePanel(){
+  const box = document.getElementById('edgePanel');
+  if(selectedEdge==null || selectedEdge>=edges.length){ box.innerHTML=''; return; }
+  const e = edges[selectedEdge], i = selectedEdge, tf = e.tf||'none';
+  const extra = tf==='affine'
+      ? `<div class="col"><label>scale</label><input data-ei="${i}" data-ek="scale" style="width:80px" placeholder="1" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)"></div>
+         <div class="col"><label>offset</label><input data-ei="${i}" data-ek="offset" style="width:80px" placeholder="0" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
+    : tf==='expression'
+      ? `<div class="col"><label>expression</label><input data-ei="${i}" data-ek="expr" style="width:170px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)"></div>` : '';
+  box.innerHTML = `<div class="edgepanel">
+    <div class="col"><label>Selected connection</label>
+      <span class="wire-label">${stepLabel(e.src_node)}.${e.src_param} → ${stepLabel(e.tgt_node)}.${e.tgt_param}</span></div>
+    <span style="flex:1"></span>
+    <div class="col"><label>Transform</label>
+      <select onchange="edgeField(${i},'tf',this.value)">
+        <option value="none" ${tf==='none'?'selected':''}>none</option>
+        <option value="affine" ${tf==='affine'?'selected':''}>× scale (+ offset)</option>
+        <option value="expression" ${tf==='expression'?'selected':''}>expression</option>
+      </select></div>
+    ${extra}
+    <button class="xbtn" onclick="removeEdge(${i})">Delete connection</button>
+  </div>`;
+}
+
+// ---- build + validate + run ----
+function buildPipeline(){
+  const bm = boundMap();
+  const p = {version:'1.0.0', nodes:[], edges:[], shared:[]};
+  nodes.forEach(n=>{
+    const params = {};
+    (n.fields||[]).forEach(f=>{
+      if(bm[n.id+':'+f.id]) return;  // bound inputs come from edges, not the form
+      let v = (n.values && n.values[f.id]!==undefined) ? n.values[f.id]
+            : (f.display!==undefined ? f.display : '');
+      if(v!==undefined && v!=='') params[f.id]=v;
+    });
+    p.nodes.push({id:n.id, fskx:n.fskx, params, x:n.x, y:n.y});
+  });
+  edges.forEach(e=>{
+    if(!(e.src_node&&e.src_param&&e.tgt_node&&e.tgt_param)) return;
+    const edge = {source:{node:e.src_node,param:e.src_param}, target:{node:e.tgt_node,param:e.tgt_param}};
+    if(e.tf==='affine' && (e.scale!==''||e.offset!=='')){
+      edge.transform = {};
+      if(e.scale!=='') edge.transform.scale = parseFloat(e.scale);
+      if(e.offset!=='') edge.transform.offset = parseFloat(e.offset);
+    } else if(e.tf==='expression' && e.expr){ edge.transform = {expression:e.expr}; }
+    p.edges.push(edge);
+  });
+  shared.forEach(s=>{
+    if(!(s.node&&s.param&&s.value!=='')) return;
+    let val = s.value;
+    if(s.dataType==='DOUBLE') val=parseFloat(s.value);
+    else if(s.dataType==='INTEGER') val=parseInt(s.value,10);
+    else if(s.dataType==='BOOLEAN') val=(s.value==='true'||s.value==='1'||s.value.toLowerCase()==='true');
+    p.shared.push({value:val, dataType:s.dataType, targets:[{node:s.node,param:s.param}]});
+  });
+  return p;
+}
+function showMessages(d){
+  const box = document.getElementById('validation');
+  let h = '';
+  (d.errors||[]).forEach(e=>h+=`<div class="msg-err">✕ ${e}</div>`);
+  (d.warnings||[]).forEach(w=>h+=`<div class="msg-warn">⚠ ${w}</div>`);
+  if(!h && d.checked) h = '<div class="ok">✓ Looks good — no problems found.</div>';
+  box.innerHTML = h;
+  return !(d.errors||[]).length;
+}
+function doValidate(){
+  fetch('/api/pipeline/validate',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(buildPipeline())}).then(r=>r.json())
+    .then(d=>{d.checked=true; showMessages(d);});
+}
+function doRun(force){
+  const nm = (document.getElementById('pipeName').value||'').trim() || currentName || '';
+  fetch('/api/pipeline/run',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), name: nm, pipeline_id: currentId,
+                         workflow_id: currentWorkflowId(), force: !!force})}).then(r=>r.json()).then(d=>{
+      if(d.error){ showMessages({errors:[d.error]}); return; }
+      document.getElementById('runSection').style.display='block';
+      document.getElementById('runSection').scrollIntoView({behavior:'smooth'});
+      liveRun = true; canvasRunMode = true;
+      runState = {map:Object.fromEntries(nodes.map(n=>[n.id,'pending'])),
+                  failed:null, finished:false, results:{}};
+      applyRunState();
+      pollStatus(d.job_id);
+    });
+}
+// ---- live run status on the canvas (TODO #3a) ----
+// translate an on_node phase ('start'/'done'/'failed') into a display state
+function phaseState(p){ return p==='start' ? 'running' : (p || 'pending'); }
+// node ids reachable downstream from any of startIds by following edges (source->target)
+function downstreamOf(startIds){
+  const adj = {};
+  edges.forEach(e=>{ (adj[e.src_node] = adj[e.src_node] || []).push(e.tgt_node); });
+  const seen = new Set(), stack = [...startIds];
+  while(stack.length){
+    const x = stack.pop();
+    (adj[x]||[]).forEach(y=>{ if(!seen.has(y)){ seen.add(y); stack.push(y); } });
+  }
+  return seen;
+}
+// build the {id->state} map from a status payload, marking downstream-of-failure honestly
+function computeRunStates(d){
+  const ns = d.nodes || {};
+  const ids = ((d.order && d.order.length) ? d.order.slice() : nodes.map(n=>n.id));
+  nodes.forEach(n=>{ if(!ids.includes(n.id)) ids.push(n.id); });
+  const map = {};
+  ids.forEach(id=>{ map[id] = phaseState((ns[id]||{}).phase); });
+  const failed = d.failed_node || ids.find(id=>map[id]==='failed') || null;
+  const finished = !!d.state && d.state!=='running';
+  if(failed){
+    const down = downstreamOf([failed]);
+    ids.forEach(id=>{
+      if(id===failed || ['done','cached','running','failed'].includes(map[id])) return;
+      map[id] = down.has(id) ? 'blocked' : (finished ? 'skipped' : 'pending');
+    });
+  }
+  return {map, failed, finished, results:(d.results||{})};
+}
+// paint the run state onto the canvas node boxes + their status glyph, then redraw wires
+const NODE_STATE_CLASSES = ['run-running','run-done','run-failed','run-blocked','run-skipped',
+  'run-cached','node-clean','node-stale','node-blocked'];
+function applyRunState(){
+  document.querySelectorAll('#canvasNodes .gnode').forEach(box=>{
+    const id = box.dataset.node;
+    box.classList.remove(...NODE_STATE_CLASSES);
+    const stat = box.querySelector('.gstat');
+    if(stat){ stat.className='gstat'; stat.innerHTML=''; }
+    if(!runState) return;
+    const s = runState.map[id] || 'pending';
+    if(s!=='pending') box.classList.add('run-'+s);
+    if(stat && s!=='pending'){
+      stat.classList.add('run-'+s);
+      const r = runState.results[id];
+      const glyph = s==='done' ? '✓' : s==='cached' ? '♻' : s==='failed' ? '✕'
+                  : (s==='blocked'||s==='skipped') ? '⊘' : '';
+      if((s==='done'||s==='cached'||s==='failed') && r && r.run_id){
+        const tip = s==='failed' ? 'view run log' : s==='cached' ? 'reused from cache — view results' : 'view results';
+        stat.innerHTML = `<a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}" title="${tip}">${glyph}</a>`;
+      } else {
+        stat.textContent = glyph;
+      }
+    }
+  });
+  drawWires();
+}
+
+// ---- per-node execution state (Phase B: caching + execute-up-to-here) ----
+function currentWorkflowId(){
+  if(currentId) return currentId;            // a saved pipeline → keyed by its id
+  if(!draftId){                              // unsaved scratch draft → stable per-browser id
+    draftId = localStorage.getItem('fskx_join_draftid');
+    if(!draftId){ draftId = 'draft_' + Math.random().toString(36).slice(2,10);
+      try{ localStorage.setItem('fskx_join_draftid', draftId); }catch(e){} }
+  }
+  return draftId;
+}
+// at-rest badges from the plan dry-run: clean (reuse) / stale (will run but has a prior run) /
+// new (will run, never run) / blocked. Skipped while a live run owns the canvas.
+function applyNodePlan(){
+  document.querySelectorAll('#canvasNodes .gnode').forEach(box=>{
+    const id = box.dataset.node;
+    box.classList.remove(...NODE_STATE_CLASSES);
+    const stat = box.querySelector('.gstat');
+    if(stat){ stat.className='gstat'; stat.innerHTML=''; }
+    const pl = nodePlan[id];
+    const clean = pl==='reuse';
+    // Execute is disabled on an up-to-date node — reset it (↺) to re-run.
+    const exbtn = box.querySelector('.gexec');
+    if(exbtn){ exbtn.disabled = clean;
+      exbtn.title = clean ? 'Up to date — press ↺ Reset to re-run'
+                          : 'Execute up to here (run this node + any stale upstream)'; }
+    if(!pl) return;
+    const ex = nodeExec[id];
+    let cls, glyph, tip;
+    if(clean){ cls='node-clean'; glyph='✓'; tip='executed — up to date'; }
+    else if(pl==='blocked'){ cls='node-blocked'; glyph='⊘'; tip='cannot load model'; }
+    else if(ex){ cls='node-stale'; glyph='●'; tip='stale — will re-run on execute'; }
+    else { return; }  // never executed: leave neutral
+    box.classList.add(cls);
+    if(stat){
+      stat.classList.add(cls);
+      if(cls==='node-clean' && ex && ex.run_id){
+        stat.innerHTML = `<a href="/runs/${encodeURIComponent(ex.fskx)}/${ex.run_id}" title="${tip}">${glyph}</a>`;
+      } else { stat.textContent = glyph; stat.title = tip; }
+    }
+  });
+  drawWires();
+}
+function paintNodes(){ if(canvasRunMode && runState) applyRunState(); else applyNodePlan(); }
+function refreshNodeState(){
+  if(!nodes.length){ nodePlan={}; nodeExec={}; if(!canvasRunMode) applyNodePlan(); return; }
+  fetch('/api/pipeline/plan',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), workflow_id: currentWorkflowId()})})
+    .then(r=>r.json()).then(d=>{
+      nodePlan = d.plan||{}; nodeExec = d.state||{};
+      if(!canvasRunMode) applyNodePlan();
+    }).catch(()=>{});
+}
+function scheduleNodeStateRefresh(){
+  if(liveRun) return;
+  clearTimeout(nodeStateTimer);
+  nodeStateTimer = setTimeout(refreshNodeState, 500);
+}
+function executeNode(nid){
+  const name = (document.getElementById('pipeName').value||'').trim() || currentName || '';
+  fetch('/api/pipeline/execute-node',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), targets:[nid], workflow_id: currentWorkflowId(),
+                         name, pipeline_id: currentId})}).then(r=>r.json()).then(d=>{
+      if(d.error){ showMessages({errors:[d.error]}); return; }
+      document.getElementById('runSection').style.display='block';
+      document.getElementById('runSection').scrollIntoView({behavior:'smooth'});
+      liveRun = true; canvasRunMode = true;
+      runState = {map:Object.fromEntries(nodes.map(n=>[n.id,'pending'])), failed:null, finished:false, results:{}};
+      applyRunState();
+      pollStatus(d.job_id);
+    });
+}
+function resetNode(nid){
+  canvasRunMode = false;  // return the canvas to at-rest badges so the reset is reflected
+  fetch('/api/pipeline/reset-node',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), node:nid, workflow_id: currentWorkflowId()})})
+    .then(r=>r.json()).then(d=>{ if(!d.error) refreshNodeState(); else showMessages({errors:[d.error]}); });
+}
+
+// shared renderers (used by both a live run and a replayed run from history)
+function renderRunList(order, rs){
+  order = (order && order.length) ? order : nodes.map(n=>n.id);
+  document.getElementById('nodeStates').innerHTML = order.map((id,idx)=>{
+    const st = rs.map[id] || 'pending';
+    const node = nodes.find(n=>n.id===id) || {label:id};
+    const r = rs.results[id];
+    const linkLabel = st==='failed' ? 'view log' : 'view results';
+    const link = (r && r.run_id) ? ` · <a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}">${linkLabel}</a>` : '';
+    return `<div class="nodestat"><span class="node-id">step ${idx+1}</span>
+      <span class="pill ${st}">${st}</span> ${node.name||node.label}${link}</div>`;
+  }).join('');
+}
+function renderProvenance(prov){
+  const el = document.getElementById('provenance');
+  if(!(prov && prov.length)){ el.innerHTML=''; return; }
+  el.innerHTML =
+    '<h2>Data flow (provenance)</h2><table class="ptable"><tr><th>From</th><th>To</th><th>Transform</th><th>Source run</th><th>Value hash</th></tr>'+
+    prov.map(pv=>{
+      const t = pv.transform ? JSON.stringify(pv.transform) : '—';
+      return `<tr><td>${pv.source.node}.${pv.source.param}</td><td>${pv.target.node}.${pv.target.param}</td>
+        <td>${t}</td><td>${pv.source_run||''}</td><td><code>${pv.value_hash||''}</code></td></tr>`;
+    }).join('')+'</table>';
+}
+
+function pollStatus(job){
+  fetch('/api/pipeline/status/'+job).then(r=>r.json()).then(d=>{
+    const running = d.state==='running';
+    document.getElementById('runMsg').innerHTML =
+      (running?'<span class="spinner"></span> ':(d.ok?'✓ ':'✕ ')) + (d.message||'');
+    runState = computeRunStates(d);
+    applyRunState();
+    renderRunList(d.order, runState);
+    renderProvenance(d.provenance);
+    if(running){ setTimeout(()=>pollStatus(job), 1200); }
+    else {
+      liveRun = false; canvasRunMode = false;  // hand the canvas back to the at-rest plan badges
+      refreshRuns();          // a finished run just produced a new history record
+      refreshNodeState();     // executed nodes now show as clean/cached, stale ones updated
+    }
+  });
+}
+
+// ---- saved states (manual snapshots of node executions + model runs) ----
+function refreshRuns(sel){
+  fetch('/api/pipeline-runs').then(r=>r.json()).then(list=>{
+    const s = document.getElementById('runPick');
+    if(!s) return;
+    s.innerHTML = '<option value="">— none —</option>' + list.map(rec=>{
+      const when = (rec.created||rec.run_id||'').replace('T',' ');
+      const mark = rec.ok ? '✓' : '✕';
+      return `<option value="${rec.run_id}" ${rec.run_id===sel?'selected':''}>${mark} ${rec.name} · ${when} · ${rec.n_nodes} nodes</option>`;
+    }).join('');
+  });
+}
+function savePastRun(){
+  const name = (document.getElementById('pipeName').value||'').trim() || currentName || 'Saved state';
+  fetch('/api/pipeline-runs/save',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), workflow_id: currentWorkflowId(),
+                         name, pipeline_id: currentId})}).then(r=>r.json()).then(d=>{
+      if(d.error){ runHistFlash('✕ '+d.error); return; }
+      refreshRuns(d.run_id); runHistFlash('💾 Saved state “'+d.name+'”.');
+    });
+}
+function loadPastRun(){
+  const id = document.getElementById('runPick').value;
+  if(!id) return;
+  fetch('/api/pipeline-runs/'+encodeURIComponent(id)).then(r=>r.json()).then(loadRunRecord);
+}
+function loadRunRecord(rec){
+  if(!rec || rec.error){ runHistFlash('✕ could not load'); return; }
+  // 1) restore the wiring snapshot onto the canvas (re-fetches ports async)
+  loadRecord({id: rec.pipeline_id||null, name: rec.name, pipeline: rec.pipeline});
+  // 2a) a SAVED STATE (has node_state): restore the working node-state so the canvas shows the
+  //     executed nodes and caching/reset keep functioning. Then show at-rest plan badges.
+  if(rec.node_state){
+    canvasRunMode = false;
+    fetch('/api/pipeline/restore-state',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({workflow_id: currentWorkflowId(), state: rec.node_state})})
+      .then(()=>refreshNodeState());
+    runHistFlash('Restored saved state from '+((rec.created||'').replace('T',' ')));
+    return;
+  }
+  // 2b) a legacy auto-saved run record (no node_state): visual replay (Phase A behaviour)
+  const phaseNodes = {}, results = {};
+  Object.entries(rec.nodes||{}).forEach(([nid,info])=>{
+    phaseNodes[nid] = {phase: info.phase || (info.ok?'done':'failed')};
+    results[nid] = {ok:info.ok, run_id:info.run_id, fskx:info.fskx};
+  });
+  runState = computeRunStates({state: rec.ok?'done':'error', failed_node: rec.failed_node,
+                               order: rec.order, nodes: phaseNodes, results});
+  canvasRunMode = true;
+  applyRunState();
+  document.getElementById('runSection').style.display='block';
+  document.getElementById('runMsg').innerHTML =
+    (rec.ok?'✓ ':'✕ ') + (rec.ok?'Pipeline finished.':'Pipeline failed.') +
+    ` <span class="hint">— replayed from history (${(rec.created||'').replace('T',' ')})</span>`;
+  renderRunList(rec.order, runState);
+  renderProvenance(rec.provenance);
+  runHistFlash('Replaying run from '+((rec.created||'').replace('T',' ')));
+}
+function deletePastRun(){
+  const id = document.getElementById('runPick').value;
+  if(!id) return;
+  if(!confirm('Delete this saved state? (The individual model results are not affected.)')) return;
+  fetch('/api/pipeline-runs/'+encodeURIComponent(id)+'/delete',{method:'POST'}).then(r=>r.json()).then(()=>{
+    refreshRuns(); runHistFlash('Deleted saved state.');
+  });
+}
+function runHistFlash(msg){ const m=document.getElementById('runHistMsg'); if(m){ m.textContent=msg;
+  setTimeout(()=>{ if(m.textContent===msg) m.textContent=''; }, 4000); } }
+
+loadState();
+nodes.forEach(ensurePos);
+if(currentName) document.getElementById('pipeName').value = currentName;
+renderAll();
+applyTransform();
+refreshSaved();
+refreshRuns();
+refreshNodeState();
+// model ports may not be cached in this draft — re-fetch any node missing params
+nodes.forEach(node=>{
+  if(node.params) return;
+  fetch('/api/model-params/'+encodeURIComponent(node.fskx)).then(r=>r.json()).then(d=>{
+    if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields; }
+    else node.error=d.error||'could not read model';
+    renderAll();
+  }).catch(()=>{});
+});
+window.addEventListener('resize', drawWires);
+</script>
+</body>
+</html>

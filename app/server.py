@@ -12,6 +12,7 @@ Also provides:
 """
 
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -21,7 +22,11 @@ from flask import (Flask, abort, jsonify, redirect, render_template,
 
 import aienv
 import engine
+import pipeline
+import pipeline_runs
+import pipeline_store
 import repo
+import workflow_state
 
 app = Flask(__name__)
 
@@ -36,39 +41,72 @@ SETTINGS = {
     # accepted as a friendly alias. Settings-UI edits override it for the session.
     "api_key": os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("API_KEY", ""),
     "model_id": os.environ.get("FSKX_CLAUDE_MODEL") or "claude-sonnet-4-6",
-    # Result of verifying the key against the Anthropic API. None = not checked yet /
-    # in progress; True/False once known. `api_key_status` is the human-readable reason.
+    # Which AI backend to use: "anthropic" (Claude, default) or "local" (an OpenAI-
+    # compatible server such as LM Studio). Plus the local endpoint + model id.
+    "provider": (os.environ.get("FSKX_AI_PROVIDER") or "anthropic").strip().lower(),
+    "local_url": os.environ.get("FSKX_LOCAL_API_URL") or aienv.DEFAULT_LOCAL_URL,
+    "local_model": os.environ.get("FSKX_LOCAL_MODEL", ""),
+    # Result of verifying the active provider. None = not checked yet / in progress;
+    # True/False once known. `api_key_status` is the human-readable reason.
     "api_key_valid": None,
     "api_key_status": "",
 }
 
 
-def _api_key_usable():
-    """Gate for AI features (chat, AI env builder).
+def _cfg():
+    """Provider config for the AI calls, derived from the live SETTINGS."""
+    return aienv.provider_config(SETTINGS)
 
-    A key is usable only if it is plausibly formatted AND verification hasn't failed.
-    While the background check is still running (`api_key_valid is None`) we allow a
-    well-formed key through optimistically so a valid key isn't briefly blocked at
-    startup; a confirmed failure (placeholder, rejected key, unreachable API) blocks it.
+
+def _ai_label():
+    """Short, human-friendly name of the currently selected AI backend, used in the UI.
+
+    "Claude" for the Anthropic backend; for a local model the bare model name with any
+    org/path prefix dropped (e.g. "google/gemma-4-26b-a4b" -> "gemma-4-26b-a4b")."""
+    cfg = _cfg()
+    if cfg["provider"] == "local":
+        name = cfg["local_model"] or "local model"
+        return name.split("/")[-1]
+    return "Claude"
+
+
+@app.context_processor
+def _inject_ai_label():
+    """Make `ai_label` available to every template so UI copy reflects the active model."""
+    return {"ai_label": _ai_label()}
+
+
+def _api_key_usable():
+    """Gate for AI features (chat, AI env builder), for whichever provider is selected.
+
+    Usable only if the provider is plausibly configured AND verification hasn't failed.
+    While the background check is still running (`api_key_valid is None`) a plausibly-
+    configured provider passes optimistically so it isn't briefly blocked at startup; a
+    confirmed failure (placeholder key, rejected key, unreachable endpoint) blocks it.
     """
-    if not aienv.key_format_ok(SETTINGS["api_key"]):
+    if not aienv.provider_usable(_cfg()):
         return False
     return SETTINGS.get("api_key_valid") is not False
 
 
 def _verify_api_key_async():
-    """Verify the configured key once, off the request path; store the outcome."""
-    key = SETTINGS["api_key"]
-    if not aienv.key_format_ok(key):
+    """Verify the active provider once, off the request path; store the outcome."""
+    cfg = _cfg()
+    if not aienv.provider_usable(cfg):
         SETTINGS["api_key_valid"] = False
-        SETTINGS["api_key_status"] = (
-            "The configured key is still the .env.example placeholder (sk-ant-...). "
-            "Add your real Anthropic key in .env or under Settings."
-            if (key or "").strip() else "No API key set.")
+        if cfg["provider"] == "local":
+            SETTINGS["api_key_status"] = "No local endpoint URL set (Settings / .env)."
+        else:
+            SETTINGS["api_key_status"] = (
+                "The configured key is still the .env.example placeholder (sk-ant-...). "
+                "Add your real Anthropic key in .env or under Settings."
+                if (cfg["api_key"] or "").strip() else "No API key set.")
         return
     SETTINGS["api_key_valid"] = None
-    SETTINGS["api_key_status"] = "Checking the API key…"
-    ok, detail = aienv.verify_api_key(key, SETTINGS["model_id"])
+    SETTINGS["api_key_status"] = ("Checking the local endpoint…"
+                                  if cfg["provider"] == "local"
+                                  else "Checking the API key…")
+    ok, detail = aienv.verify_provider(cfg)
     SETTINGS["api_key_valid"] = ok
     SETTINGS["api_key_status"] = detail
 
@@ -366,6 +404,325 @@ def run_stored_file(fskx, run_id, name):
 
 
 # ---------------------------------------------------------------------------
+# Model joining — build and run a pipeline (DAG) of chained model runs
+# ---------------------------------------------------------------------------
+
+def _join_label(fskx):
+    """A readable node-menu label from a filename (strip the __id8 suffix + extension)."""
+    base = fskx[:-5] if fskx.lower().endswith(".fskx") else fskx
+    if "__" in base:
+        base = base.rsplit("__", 1)[0]
+    return base.replace("_", " ").strip() or fskx
+
+
+@app.route("/join")
+def join_page():
+    """Edge-first join builder: add models as nodes, wire output/input ports into edges,
+    optionally with a unit transform, then validate and run the whole DAG."""
+    models = [{"fskx": f, "label": _join_label(f)} for f in engine.list_models()]
+    models.sort(key=lambda m: m["label"].lower())
+    return render_template("join.html", models=models, api_key_set=_api_key_usable())
+
+
+@app.route("/api/model-params/<path:fskx>")
+def api_model_params(fskx):
+    """Declared parameters of one model, for populating the builder's port menus."""
+    if fskx not in engine.list_models():
+        abort(404)
+    try:
+        specs = engine.model_param_specs(fskx)
+        try:
+            info = engine.model_info(fskx)
+            name, language, fields = info["name"], info["language"], info["fields"]
+        except Exception:  # noqa: BLE001
+            name, language, fields = _join_label(fskx), "?", []
+        return jsonify({"ok": True, "name": name, "language": language,
+                        "params": specs, "fields": fields})
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)})
+
+
+@app.route("/api/pipeline/validate", methods=["POST"])
+def api_pipeline_validate():
+    p = request.get_json(force=True, silent=True) or {}
+    try:
+        errors, warnings = pipeline.validate(p)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"errors": [str(exc)], "warnings": []})
+    return jsonify({"errors": errors, "warnings": warnings})
+
+
+def _pipeline_exec_job(job_id, p, run_id, targets, workflow_id=None, force=False,
+                       name=None, pipeline_id=None):
+    """Run a (possibly partial) execution via the caching engine: only ``targets`` and their
+    stale ancestors run, valid caches are reused. Persists the updated node-state map and a
+    Phase-A history record."""
+    def on_node(nid, phase, info):
+        with JOBS_LOCK:
+            nodes = JOBS[job_id].setdefault("nodes", {})
+            nodes[nid] = {"phase": phase, **info}
+    state = {} if force else workflow_state.load(workflow_id)
+    try:
+        rec = pipeline.execute_to(p, targets, state=state,
+                                  progress=_progress(job_id), on_node=on_node)
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        _set(job_id, state="error", error=traceback.format_exc(),
+             message=f"Pipeline failed: {exc}")
+        return
+    # Persist the updated execution state *before* announcing done, so the UI never sees a
+    # finished run whose node-state isn't yet readable. History records are NOT auto-saved —
+    # the user saves a state snapshot explicitly (see /api/pipeline-runs/save). Best-effort.
+    try:
+        workflow_state.save(workflow_id, rec.get("state", state))
+    except Exception:  # noqa: BLE001
+        pass
+    n_ran, n_reused = len(rec.get("ran", [])), len(rec.get("reused", []))
+    if rec.get("ok"):
+        msg = "Done — %d run, %d reused from cache." % (n_ran, n_reused)
+    else:
+        msg = "Pipeline failed: " + "; ".join(rec.get("errors", []) or ["see logs"])
+    _set(job_id, state=("done" if rec.get("ok") else "error"), result=rec, message=msg)
+
+
+def _start_exec(p, targets, workflow_id, force, name, pipeline_id):
+    job_id = _new_job("pipeline")
+    run_id = pipeline_runs.new_run_id()
+    with JOBS_LOCK:
+        JOBS[job_id]["nodes"] = {}
+        JOBS[job_id]["pipeline_run_id"] = run_id
+    threading.Thread(target=_pipeline_exec_job, args=(job_id, p, run_id, targets),
+                     kwargs={"workflow_id": workflow_id, "force": force,
+                             "name": name, "pipeline_id": pipeline_id}, daemon=True).start()
+    return jsonify({"job_id": job_id, "pipeline_run_id": run_id})
+
+
+@app.route("/api/pipeline/run", methods=["POST"])
+def api_pipeline_run():
+    """Cache-aware whole-graph run: every node is a target, so only stale nodes execute and
+    valid caches are reused. ``force=true`` ignores the cache (re-run all from scratch)."""
+    body = request.get_json(force=True, silent=True) or {}
+    # Accept either a bare pipeline (legacy) or {pipeline, name, pipeline_id, workflow_id, force}.
+    wrapped = "pipeline" in body
+    p = (body.get("pipeline") if wrapped else body) or {}
+    name = body.get("name") if wrapped else None
+    pipeline_id = body.get("pipeline_id") if wrapped else None
+    workflow_id = body.get("workflow_id") if wrapped else None
+    force = bool(body.get("force")) if wrapped else False
+    if not p.get("nodes"):
+        return jsonify({"error": "Add at least one model node."}), 400
+    errors, _warn = pipeline.validate(p)
+    if errors:
+        return jsonify({"error": "Cannot run: " + "; ".join(errors)}), 400
+    targets = [n["id"] for n in p["nodes"]]
+    return _start_exec(p, targets, workflow_id, force, name, pipeline_id)
+
+
+@app.route("/api/pipeline/execute-node", methods=["POST"])
+def api_pipeline_execute_node():
+    """Execute one or more nodes 'up to here': run the targets and only their stale ancestors,
+    reusing valid caches. Body: {pipeline, targets:[nid], workflow_id, name?, pipeline_id?}."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    targets = body.get("targets") or []
+    if not p.get("nodes"):
+        return jsonify({"error": "Add at least one model node."}), 400
+    if not targets:
+        return jsonify({"error": "No node selected to execute."}), 400
+    errors, _warn = pipeline.validate(p)
+    if errors:
+        return jsonify({"error": "Cannot run: " + "; ".join(errors)}), 400
+    return _start_exec(p, targets, body.get("workflow_id"), bool(body.get("force")),
+                       body.get("name"), body.get("pipeline_id"))
+
+
+@app.route("/api/pipeline/reset-node", methods=["POST"])
+def api_pipeline_reset_node():
+    """Reset a node + everything downstream of it (forget their cached executions; artifacts in
+    _results are NOT deleted). Body: {pipeline, node, workflow_id}."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    node = body.get("node")
+    if not node:
+        return jsonify({"error": "No node given."}), 400
+    targets = sorted(pipeline.descendants(p, [node]))
+    workflow_state.reset(body.get("workflow_id"), targets)
+    return jsonify({"ok": True, "reset": targets})
+
+
+@app.route("/api/pipeline/plan", methods=["POST"])
+def api_pipeline_plan():
+    """Dry-run: per node, whether the next execute would reuse the cache, run, or is blocked —
+    plus the executed-state summary (run ids) for canvas badges + result links. Body:
+    {pipeline, workflow_id}."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    wid = body.get("workflow_id")
+    if not p.get("nodes"):
+        return jsonify({"plan": {}, "state": {}})
+    state = workflow_state.load(wid)
+    fskx_of = {n["id"]: n.get("fskx") for n in p["nodes"]}
+    try:
+        pmap = pipeline.plan(p, state=state)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"plan": {}, "state": {}, "error": str(exc)})
+    state_nodes = {nid: {"run_id": s.get("run_id"), "ok": s.get("ok"),
+                         "fskx": fskx_of.get(nid)}
+                   for nid, s in state.items()}
+    return jsonify({"plan": pmap, "state": state_nodes})
+
+
+@app.route("/api/pipeline/status/<job_id>")
+def api_pipeline_status(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+        if not job:
+            abort(404)
+        payload = {"state": job["state"], "message": job["message"],
+                   "nodes": job.get("nodes", {}),
+                   "pipeline_run_id": job.get("pipeline_run_id")}
+        r = job.get("result")
+        if r:
+            payload.update({
+                "ok": r.get("ok"), "order": r.get("order", []),
+                "provenance": r.get("provenance", []),
+                "errors": r.get("errors", []), "failed_node": r.get("failed_node"),
+                "ran": r.get("ran", []), "reused": r.get("reused", []),
+            })
+            payload["results"] = {
+                nid: {"ok": res.get("ok"), "run_id": res.get("run_id"),
+                      "fskx": res.get("fskx"), "plots": res.get("plots", []),
+                      "files": res.get("files", [])}
+                for nid, res in (r.get("results") or {}).items()
+            }
+        if job.get("error"):
+            payload["error"] = job["error"]
+    return jsonify(payload)
+
+
+# ---------------------------------------------------------------------------
+# Saved states — durable, *manually saved* snapshots of a workflow's node executions
+# (stateful-workflow Phase A, now manual per user request). A record references the per-node
+# model runs in _results AND carries the raw node-state (cache hashes) so loading one restores
+# the working state — caching/reset keep functioning. See model-joining/phase-A-run-history.md.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/pipeline-runs", methods=["GET"])
+def api_pipeline_runs_list():
+    return jsonify(pipeline_runs.list_runs())
+
+
+@app.route("/api/pipeline-runs/save", methods=["POST"])
+def api_pipeline_runs_save():
+    """Manually save the current workflow's node-state as a named snapshot."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    wid = body.get("workflow_id")
+    if not p.get("nodes"):
+        return jsonify({"error": "Nothing to save — add at least one node."}), 400
+    state = workflow_state.load(wid)
+    if not state:
+        return jsonify({"error": "Nothing to save yet — run or execute some nodes first."}), 400
+    try:
+        order = pipeline.topo_order(p)
+    except Exception:  # noqa: BLE001
+        order = [n["id"] for n in p["nodes"]]
+    rec = pipeline_runs.build_record_from_state(
+        pipeline_runs.new_run_id(), p, state, order=order,
+        name=body.get("name"), pipeline_id=body.get("pipeline_id"))
+    pipeline_runs.save_run(rec)
+    return jsonify({"ok": True, "run_id": rec["run_id"], "name": rec["name"]})
+
+
+@app.route("/api/pipeline-runs/<run_id>", methods=["GET"])
+def api_pipeline_runs_get(run_id):
+    rec = pipeline_runs.load_run(run_id)
+    if not rec:
+        abort(404)
+    return jsonify(rec)
+
+
+@app.route("/api/pipeline-runs/<run_id>/delete", methods=["POST"])
+def api_pipeline_runs_delete(run_id):
+    return jsonify({"ok": pipeline_runs.delete_run(run_id)})
+
+
+@app.route("/api/pipeline/restore-state", methods=["POST"])
+def api_pipeline_restore_state():
+    """Restore a saved node-state map into a workflow (used when loading a saved state), so the
+    canvas shows the executed nodes and cache reuse keeps working. Body: {workflow_id, state}."""
+    body = request.get_json(force=True, silent=True) or {}
+    wid = body.get("workflow_id")
+    if not wid:
+        return jsonify({"error": "no workflow id"}), 400
+    workflow_state.save(wid, body.get("state") or {})
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Saved pipelines — durable, named join configurations (+ shareable archives)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/pipelines", methods=["GET"])
+def api_pipelines_list():
+    return jsonify(pipeline_store.list_all())
+
+
+@app.route("/api/pipelines", methods=["POST"])
+def api_pipelines_save():
+    d = request.get_json(force=True, silent=True) or {}
+    p = d.get("pipeline") or {}
+    if not p.get("nodes"):
+        return jsonify({"error": "Nothing to save — add at least one node."}), 400
+    rec = pipeline_store.save(p, d.get("name"), d.get("id"))
+    return jsonify({"id": rec["id"], "name": rec["name"], "modified": rec["modified"]})
+
+
+@app.route("/api/pipelines/<pid>", methods=["GET"])
+def api_pipelines_get(pid):
+    rec = pipeline_store.load(pid)
+    if not rec:
+        abort(404)
+    return jsonify(rec)
+
+
+@app.route("/api/pipelines/<pid>/delete", methods=["POST"])
+def api_pipelines_delete(pid):
+    return jsonify({"ok": pipeline_store.delete(pid)})
+
+
+@app.route("/api/pipelines/<pid>/export")
+def api_pipelines_export(pid):
+    res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR)
+    if not res:
+        abort(404)
+    tmp, name = res
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name) or "pipeline"
+    return send_file(tmp, as_attachment=True,
+                     download_name=safe + pipeline_store.ARCHIVE_EXT)
+
+
+@app.route("/api/pipelines/import", methods=["POST"])
+def api_pipelines_import():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file uploaded."}), 400
+    fd, tmp = tempfile.mkstemp(suffix=pipeline_store.ARCHIVE_EXT)
+    os.close(fd)
+    f.save(tmp)
+    try:
+        rec = pipeline_store.import_archive(tmp, models_dir=engine.MODELS_DIR)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"Could not import: {exc}"}), 400
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    return jsonify({"id": rec["id"], "name": rec["name"]})
+
+
+# ---------------------------------------------------------------------------
 # Online repository
 # ---------------------------------------------------------------------------
 
@@ -458,8 +815,13 @@ def cleanup_page(job_id):
 def settings():
     saved = False
     if request.method == "POST":
+        provider = request.form.get("provider", "anthropic").strip().lower()
+        SETTINGS["provider"] = provider if provider in ("anthropic", "local") else "anthropic"
         SETTINGS["api_key"] = request.form.get("api_key", "").strip()
         SETTINGS["model_id"] = request.form.get("model_id", "").strip() or "claude-sonnet-4-6"
+        SETTINGS["local_url"] = (request.form.get("local_url", "").strip()
+                                 or aienv.DEFAULT_LOCAL_URL)
+        SETTINGS["local_model"] = request.form.get("local_model", "").strip()
         # Re-verify synchronously here so the page can show the result immediately.
         _verify_api_key_async()
         saved = True
@@ -482,14 +844,15 @@ def ai_page(fskx):
                            language=info["language"],
                            docker=engine.docker_status()["docker_available"],
                            api_key_set=_api_key_usable(),
-                           model_id=SETTINGS["model_id"],
+                           model_id=_cfg()["local_model"] if SETTINGS["provider"] == "local"
+                                    else SETTINGS["model_id"],
                            has_error=bool(LAST_ERROR.get(fskx)))
 
 
 def _ai_generate_job(job_id, fskx):
     try:
         tag, dockerfile = engine.ai_generate_dockerfile(
-            fskx, SETTINGS["api_key"], SETTINGS["model_id"],
+            fskx, _cfg(),
             error_log=LAST_ERROR.get(fskx, ""),
             prev_dockerfile=LAST_DOCKERFILE.get(fskx, ""))
         LAST_DOCKERFILE[fskx] = dockerfile
@@ -554,7 +917,8 @@ def chat_page(fskx):
                            n_runs=len(engine.list_runs(fskx)),
                            api_key_set=_api_key_usable(),
                            api_key_status=SETTINGS.get("api_key_status", ""),
-                           model_id=SETTINGS["model_id"])
+                           model_id=_cfg()["local_model"] if SETTINGS["provider"] == "local"
+                                    else SETTINGS["model_id"])
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -567,12 +931,11 @@ def api_chat():
         return jsonify({"error": "Unknown model."}), 404
     if not _api_key_usable():
         return jsonify({"error": SETTINGS.get("api_key_status")
-                        or "No usable Claude API key. Add one under Settings."}), 400
+                        or "No usable AI backend. Configure one under Settings."}), 400
     if not messages:
         return jsonify({"error": "No message to send."}), 400
     try:
-        reply = engine.chat_about_model(fskx, messages, SETTINGS["api_key"],
-                                        SETTINGS["model_id"], run_ids=run_ids)
+        reply = engine.chat_about_model(fskx, messages, _cfg(), run_ids=run_ids)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
     return jsonify({"reply": reply})

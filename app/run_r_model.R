@@ -13,6 +13,12 @@ outdir  <- args[2]
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
 outdir <- normalizePath(outdir)
 
+# Directory this wrapper lives in (so we can source interchange.R beside it, in both the
+# APP_DIR and the synced /work/_runner/ docker location).
+.allargs <- commandArgs(trailingOnly = FALSE)
+.file_arg <- sub("^--file=", "", .allargs[grepl("^--file=", .allargs)])
+runner_dir <- if (length(.file_arg)) dirname(normalizePath(.file_arg[1])) else getwd()
+
 setwd(workdir)
 
 # The engine resolves the actual script names (roles come from metadata.rdf, so they
@@ -137,6 +143,55 @@ if (requireNamespace("jsonlite", quietly = TRUE)) {
   writeLines(jsonlite::toJSON(res, auto_unbox = TRUE, force = TRUE, null = "null",
                               digits = 8),
              file.path(outdir, "results.json"))
+}
+
+# Emit the typed interchange bundle (model-joining Phase 1): the model's declared
+# parameters (INPUT/CONSTANT/OUTPUT, each tagged with classification), serialized in the
+# language-neutral format. Best-effort — failures become warnings, never a failed run.
+if (isTRUE(result) && !is.null(plan$serialize_params) && length(plan$serialize_params)) {
+  ic_ok <- tryCatch({ source(file.path(runner_dir, "interchange.R"), local = FALSE); TRUE },
+                    error = function(e) FALSE)
+  if (ic_ok) {
+    op <- plan$serialize_params  # jsonlite simplifies an array of objects to a data.frame
+    n_out <- if (is.data.frame(op)) nrow(op) else length(op)
+    params <- list()
+    for (i in seq_len(n_out)) {
+      if (is.data.frame(op)) {
+        pid <- as.character(op$id[i])
+        dt  <- if (!is.null(op$dataType)) as.character(op$dataType[i]) else ""
+        cls <- if (!is.null(op$classification)) as.character(op$classification[i]) else ""
+        nm  <- if (!is.null(op$name) && !is.na(op$name[i])) op$name[i] else NULL
+        un  <- if (!is.null(op$unit) && !is.na(op$unit[i])) op$unit[i] else NULL
+      } else {
+        row <- op[[i]]; pid <- row$id; dt <- row$dataType; cls <- row$classification
+        nm <- row$name; un <- row$unit
+      }
+      if (exists(pid, envir = .GlobalEnv, inherits = TRUE)) {
+        val <- tryCatch(get(pid, envir = .GlobalEnv, inherits = TRUE),
+                        error = function(e) NULL)
+        params[[length(params) + 1]] <- list(id = pid, dataType = dt, classification = cls,
+                                              name = nm, unit = un, value = val)
+      } else if (identical(toupper(cls), "OUTPUT")) {
+        status$warnings <- c(status$warnings,
+                             paste0("declared OUTPUT '", pid, "' not found; skipped"))
+      }
+    }
+    gen <- list(tool = "FSKX Runner",
+                modelId = if (!is.null(plan$model_id)) plan$model_id else "",
+                runId = basename(outdir))
+    wb <- tryCatch(ic_write_bundle(params, outdir, "R", gen),
+                   error = function(e) {
+                     status$warnings <<- c(status$warnings,
+                       paste("interchange bundle not written:", conditionMessage(e)))
+                     NULL
+                   })
+    if (!is.null(wb)) status$warnings <- c(status$warnings, wb$warnings)
+  } else {
+    status$warnings <- c(status$warnings, "interchange.R could not be sourced; outputs.json skipped")
+  }
+}
+
+if (requireNamespace("jsonlite", quietly = TRUE)) {
   writeLines(jsonlite::toJSON(status, auto_unbox = TRUE, force = TRUE, null = "null"),
              file.path(outdir, "status.json"))
 }

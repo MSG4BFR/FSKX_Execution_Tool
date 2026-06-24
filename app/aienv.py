@@ -25,6 +25,30 @@ import depresolve
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
+# Default endpoint for a local OpenAI-compatible server (LM Studio, Ollama, llama.cpp …).
+# NOTE: the app runs INSIDE a container, so `localhost` would point at the container, not
+# the host where LM Studio listens. `host.docker.internal` reaches the host on Docker
+# Desktop (macOS/Windows) and on Linux when the launcher adds the host-gateway mapping.
+DEFAULT_LOCAL_URL = "http://host.docker.internal:1234/v1"
+
+
+def provider_config(settings):
+    """Normalize a settings-like dict into a provider config used by the LLM calls.
+
+    Keys: provider ('anthropic'|'local'), api_key, model_id (Claude model),
+    local_url (OpenAI-compatible base, …/v1), local_model (id served locally).
+    """
+    provider = (settings.get("provider") or "anthropic").strip().lower()
+    if provider not in ("anthropic", "local"):
+        provider = "anthropic"
+    return {
+        "provider": provider,
+        "api_key": (settings.get("api_key") or "").strip(),
+        "model_id": (settings.get("model_id") or "claude-sonnet-4-6").strip(),
+        "local_url": (settings.get("local_url") or DEFAULT_LOCAL_URL).strip().rstrip("/"),
+        "local_model": (settings.get("local_model") or "").strip(),
+    }
+
 # Contract the generated Dockerfile must satisfy. The image is run as:
 #   docker run --rm -v fskx_work:/work <image> <INTERPRETER> /app/<runner> /work/<in> /work/<out>
 SYSTEM_PROMPT = """\
@@ -190,6 +214,119 @@ def verify_api_key(api_key, model_id="claude-sonnet-4-6", timeout=20):
     return False, f"Anthropic API error {r.status_code}: {r.text[:200]}"
 
 
+def verify_local(local_url, local_model, timeout=20):
+    """Check that a local OpenAI-compatible endpoint is reachable and has a model.
+
+    Returns (ok, detail). Tries GET {url}/models first (cheap, lists loaded models);
+    falls back to a tiny chat completion if that route isn't served.
+    """
+    url = (local_url or "").strip().rstrip("/")
+    if not url:
+        return False, "No local endpoint URL set."
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"}
+    try:
+        r = requests.get(url + "/models", headers=headers, timeout=timeout)
+    except requests.RequestException as exc:
+        return False, (f"Could not reach the local endpoint at {url} ({exc}). If the app "
+                       "runs in Docker, use http://host.docker.internal:<port>/v1, not "
+                       "localhost, and make sure LM Studio's server is started.")
+    if r.status_code == 200:
+        ids = []
+        try:
+            ids = [m.get("id", "") for m in (r.json().get("data") or [])]
+        except ValueError:
+            pass
+        if local_model and ids and local_model not in ids:
+            return True, (f"Endpoint reachable, but '{local_model}' isn't in the loaded "
+                          f"models ({', '.join(ids) or 'none'}). Load it in LM Studio or "
+                          "fix the model id.")
+        return True, f"Local endpoint reachable at {url}."
+    return False, f"Local endpoint returned HTTP {r.status_code}: {r.text[:200]}"
+
+
+def verify_provider(cfg, timeout=20):
+    """Verify whichever provider `cfg` selects. Returns (ok, detail)."""
+    if cfg["provider"] == "local":
+        return verify_local(cfg["local_url"], cfg["local_model"], timeout=timeout)
+    return verify_api_key(cfg["api_key"], cfg["model_id"], timeout=timeout)
+
+
+def provider_usable(cfg):
+    """Offline gate for AI features given a provider config.
+
+    Local: a non-empty endpoint URL is enough to try. Anthropic: a plausibly-shaped key.
+    (A confirmed verification failure is handled separately by the caller.)
+    """
+    if cfg["provider"] == "local":
+        return bool(cfg["local_url"])
+    return key_format_ok(cfg["api_key"])
+
+
+# ---------------------------------------------------------------------------
+# Provider-agnostic chat completion
+# ---------------------------------------------------------------------------
+
+def _complete_anthropic(cfg, system, messages, max_tokens, timeout):
+    headers = {
+        "x-api-key": cfg["api_key"],
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {"model": cfg["model_id"], "max_tokens": max_tokens,
+            "system": system, "messages": messages}
+    r = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=timeout)
+    if r.status_code != 200:
+        raise RuntimeError(f"Anthropic API error {r.status_code}: {r.text[:500]}")
+    data = r.json()
+    return "".join(block.get("text", "") for block in data.get("content", [])
+                   if block.get("type") == "text").strip()
+
+
+def _flatten_content(content):
+    """Reduce Anthropic-style content (str or list of blocks) to plain text for the
+    OpenAI-compatible API, which doesn't accept document/image blocks here."""
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "\n\n".join(parts)
+
+
+def _complete_openai(cfg, system, messages, max_tokens, timeout):
+    url = cfg["local_url"].rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": "Bearer lm-studio"}
+    oai_messages = [{"role": "system", "content": system}]
+    for m in messages:
+        oai_messages.append({"role": m["role"],
+                             "content": _flatten_content(m.get("content"))})
+    body = {"model": cfg["local_model"], "max_tokens": max_tokens,
+            "temperature": 0.2, "messages": oai_messages}
+    try:
+        r = requests.post(url, headers=headers, json=body, timeout=timeout)
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not reach the local model at {url}: {exc}. Check that LM Studio's "
+            "server is running and the endpoint URL in Settings/.env is correct "
+            "(inside Docker use host.docker.internal, not localhost).")
+    if r.status_code != 200:
+        raise RuntimeError(f"Local model error {r.status_code}: {r.text[:500]}")
+    data = r.json()
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError(f"Unexpected response from local model: {str(data)[:300]}")
+
+
+def complete(cfg, system, messages, max_tokens, timeout=180):
+    """Provider-agnostic completion. `messages` uses Anthropic-style content (str or
+    text blocks); non-text blocks are dropped for the local provider."""
+    if cfg["provider"] == "local":
+        return _complete_openai(cfg, system, messages, max_tokens, timeout)
+    return _complete_anthropic(cfg, system, messages, max_tokens, timeout)
+
+
 def docker_available():
     """True if the docker CLI is present and can reach a daemon."""
     if shutil.which("docker") is None:
@@ -306,27 +443,12 @@ def gather_context(model_dir, error_log="", prev_dockerfile=""):
     return spec, "\n\n".join(parts)
 
 
-def generate_dockerfile(model_dir, api_key, model_id, error_log="", prev_dockerfile="",
+def generate_dockerfile(model_dir, cfg, error_log="", prev_dockerfile="",
                         max_tokens=2500):
-    """Call Claude to generate a Dockerfile. Returns (spec, dockerfile_text)."""
+    """Generate a Dockerfile via the selected provider. Returns (spec, dockerfile_text)."""
     spec, user_msg = gather_context(model_dir, error_log, prev_dockerfile)
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    body = {
-        "model": model_id,
-        "max_tokens": max_tokens,
-        "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": user_msg}],
-    }
-    r = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=180)
-    if r.status_code != 200:
-        raise RuntimeError(f"Anthropic API error {r.status_code}: {r.text[:500]}")
-    data = r.json()
-    text = "".join(block.get("text", "") for block in data.get("content", [])
-                   if block.get("type") == "text").strip()
+    text = complete(cfg, SYSTEM_PROMPT,
+                    [{"role": "user", "content": user_msg}], max_tokens)
     return spec, sanitize_dockerfile(text)
 
 
@@ -529,7 +651,30 @@ def _gather_results_context(fskx_name, run_ids=None, per_run_limit=4000, total_l
     return "\n\n".join(blocks)
 
 
-def chat_about_model(model_dir, fskx_name, messages, api_key, model_id, run_ids=None,
+def _extract_pdf_text(path, limit=20000):
+    """Best-effort plain-text extraction from a PDF, for providers that can't take a
+    native PDF document block (the local OpenAI-compatible path). Returns "" if no
+    extractor is available or it fails — the chat then relies on the other context."""
+    try:
+        import pypdf
+    except ImportError:
+        return ""
+    try:
+        reader = pypdf.PdfReader(path)
+        out, total = [], 0
+        for page in reader.pages:
+            txt = page.extract_text() or ""
+            out.append(txt)
+            total += len(txt)
+            if total >= limit:
+                break
+        text = "\n".join(out).strip()
+        return text[:limit] + "\n…(truncated)…" if len(text) > limit else text
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def chat_about_model(model_dir, fskx_name, messages, cfg, run_ids=None,
                      max_tokens=1500):
     """
     Answer a (possibly multi-turn) conversation about a model and its results.
@@ -537,11 +682,22 @@ def chat_about_model(model_dir, fskx_name, messages, api_key, model_id, run_ids=
     `messages` is the full browser-side conversation as a list of
     {"role": "user"|"assistant", "content": "<text>"} — resent each turn so follow-up
     questions keep their context. The model archive context and a digest of ALL stored
-    runs go into the system prompt; the paper PDF (if any) rides along with the first user
-    turn as a native document block. Returns the assistant's reply text.
+    runs go into the system prompt. The paper PDF (if any) is attached as a native
+    document block for Claude, or extracted to text and folded into the system prompt for
+    a local model. Returns the assistant's reply text.
     """
+    model_context = _gather_model_context(model_dir)
+    pdf_path = _find_paper_pdf(model_dir)
+
+    # For local models, fold the paper's extracted text into the model context (no native
+    # PDF support). For Claude, the PDF rides along as a document block (below).
+    if pdf_path and cfg["provider"] == "local":
+        paper_text = _extract_pdf_text(pdf_path)
+        if paper_text:
+            model_context += "\n\nSOURCE PAPER (extracted text):\n" + paper_text
+
     system = CHAT_SYSTEM_PROMPT.format(
-        model_context=_gather_model_context(model_dir),
+        model_context=model_context,
         results_context=_gather_results_context(fskx_name, run_ids=run_ids),
     )
 
@@ -554,9 +710,9 @@ def chat_about_model(model_dir, fskx_name, messages, api_key, model_id, run_ids=
     if not api_messages:
         raise RuntimeError("No message to send.")
 
-    # Attach the paper PDF to the first user turn (resent each request; acceptable here).
-    pdf_path = _find_paper_pdf(model_dir)
-    if pdf_path:
+    # Claude only: attach the paper PDF to the first user turn as a native document block
+    # (resent each request; acceptable here). `complete` drops non-text blocks for local.
+    if pdf_path and cfg["provider"] != "local":
         for am in api_messages:
             if am["role"] == "user":
                 try:
@@ -571,20 +727,4 @@ def chat_about_model(model_dir, fskx_name, messages, api_key, model_id, run_ids=
                     pass
                 break
 
-    headers = {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    body = {
-        "model": model_id,
-        "max_tokens": max_tokens,
-        "system": system,
-        "messages": api_messages,
-    }
-    r = requests.post(ANTHROPIC_URL, headers=headers, json=body, timeout=180)
-    if r.status_code != 200:
-        raise RuntimeError(f"Anthropic API error {r.status_code}: {r.text[:500]}")
-    data = r.json()
-    return "".join(block.get("text", "") for block in data.get("content", [])
-                   if block.get("type") == "text").strip()
+    return complete(cfg, system, api_messages, max_tokens)

@@ -34,6 +34,10 @@ fi
 : "${ANTHROPIC_API_KEY:=${API_KEY:-}}"
 export ANTHROPIC_API_KEY
 export FSKX_CLAUDE_MODEL="${FSKX_CLAUDE_MODEL:-}"
+# Optional local (OpenAI-compatible / LM Studio) AI backend.
+export FSKX_AI_PROVIDER="${FSKX_AI_PROVIDER:-}"
+export FSKX_LOCAL_API_URL="${FSKX_LOCAL_API_URL:-}"
+export FSKX_LOCAL_MODEL="${FSKX_LOCAL_MODEL:-}"
 
 # Resolve the models folder and port. Precedence: CLI argument > .env > default.
 # Default: a dedicated "fskx_models" folder inside fskx-runner (created if missing).
@@ -62,10 +66,17 @@ echo
 # Persist per-model environments and work files across runs via named volumes.
 # The models folder is mounted read-write so repository downloads can be saved there.
 # The Docker socket is mounted so the AI-assisted feature can build/run per-model images.
+# `--add-host=host.docker.internal:host-gateway` lets the container reach a local LM Studio
+# server on the host (Docker Desktop maps this name automatically; on plain Linux it does
+# not, so we add it explicitly). Harmless when the local backend isn't used.
 docker run --rm \
   -p "$PORT:8000" \
+  --add-host=host.docker.internal:host-gateway \
   -e ANTHROPIC_API_KEY \
   -e FSKX_CLAUDE_MODEL \
+  -e FSKX_AI_PROVIDER \
+  -e FSKX_LOCAL_API_URL \
+  -e FSKX_LOCAL_MODEL \
   -v "$MODELS_DIR:/models" \
   -v fskx_envs:/opt/conda/envs \
   -v fskx_work:/work \

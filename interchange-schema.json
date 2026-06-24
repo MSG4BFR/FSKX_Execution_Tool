@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/RakipInitiative/Model-Metadata-Schema/blob/main/interchange-schema.json",
+  "title": "FSKX Model-Interchange Bundle v1.0.0",
+  "description": "Language-neutral, typed serialization of FSK-ML model parameter VALUES, used to pass the OUTPUT(s) of one model run into the INPUT(s) of another (model joining/chaining). A superset of the RAKIP Parameter-JSON-Exchange-Format (parameters-schema.json): it keeps `parameters[].metadata`, `parameters[].data` and `parameters[].modelId`, but gives `data` a concrete, per-dataType encoding so any reader (R, Python 2/3, ...) can reconstruct the value without sharing a runtime. Large or binary values are spilled to sidecar files referenced by relative path; the JSON stays human-readable and diffable.",
+  "type": "object",
+  "required": ["formatVersion", "generatorLanguage", "parameters"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": {
+      "type": "string",
+      "description": "Semantic version of THIS interchange format.",
+      "const": "1.0.0"
+    },
+    "generatorLanguage": {
+      "type": "string",
+      "description": "Script language that produced the bundle (provenance only; readers are language-agnostic).",
+      "enum": ["R", "Python"]
+    },
+    "generatedBy": {
+      "type": "object",
+      "description": "Optional provenance for the whole bundle.",
+      "additionalProperties": true,
+      "properties": {
+        "tool": { "type": "string", "description": "e.g. 'FSKX Runner'." },
+        "modelId": { "type": "string", "description": "FSK-ML model identifier (metaData.json generalInformation.identifier)." },
+        "runId": { "type": "string", "description": "Run folder id this bundle was produced in (e.g. 20260623_101530)." },
+        "timestamp": { "type": "string", "format": "date-time" }
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "description": "One entry per serialized parameter value (typically the model's declared OUTPUT params, but any classification is permitted).",
+      "items": { "$ref": "#/definitions/parameterValue" }
+    }
+  },
+  "definitions": {
+    "dataType": {
+      "type": "string",
+      "description": "FSK-ML controlled vocabulary for parameter data types (see FSKX spec 4.3).",
+      "enum": [
+        "NUMBER", "INTEGER", "DOUBLE", "BOOLEAN", "STRING", "DATE",
+        "VECTOROFNUMBERS", "MATRIXOFNUMBERS", "FILE", "OBJECT"
+      ]
+    },
+    "parameterValue": {
+      "type": "object",
+      "required": ["metadata", "data", "modelId"],
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "type": "object",
+          "description": "Parameter metadata. Mirrors the ModelMetadataSchema `Parameter` object; only the fields needed to interpret the value are required here.",
+          "required": ["id", "dataType"],
+          "additionalProperties": true,
+          "properties": {
+            "id": { "type": "string", "description": "Parameter id (must match the variable/parameter name in the model script)." },
+            "name": { "type": "string" },
+            "classification": { "type": "string", "enum": ["INPUT", "CONSTANT", "OUTPUT"] },
+            "dataType": { "$ref": "#/definitions/dataType" },
+            "unit": { "type": "string" },
+            "description": { "type": "string" }
+          }
+        },
+        "modelId": {
+          "type": "string",
+          "description": "Id of the model that produced/uses this parameter (enables multi-model bundles)."
+        },
+        "provenance": {
+          "type": "object",
+          "description": "Optional per-parameter provenance.",
+          "additionalProperties": true,
+          "properties": {
+            "runId": { "type": "string" },
+            "sourceVariable": { "type": "string", "description": "Variable name in the generating namespace, if it differs from id." }
+          }
+        },
+        "data": { "$ref": "#/definitions/typedValue" }
+      }
+    },
+    "typedValue": {
+      "type": "object",
+      "description": "Concrete encoding of a single value. `encoding` discriminates inline (value in JSON) from ref (value in a sidecar file). `dataType` is echoed here so the value is self-describing independent of metadata.",
+      "required": ["dataType", "encoding"],
+      "additionalProperties": false,
+      "properties": {
+        "dataType": { "$ref": "#/definitions/dataType" },
+        "encoding": {
+          "type": "string",
+          "enum": ["inline", "ref"],
+          "description": "inline: value carried in `value`. ref: value stored in the sidecar described by `ref`."
+        },
+        "value": {
+          "description": "The inline value. Shape depends on dataType (see INTERCHANGE_SPEC.md). Non-finite numbers are encoded as null and flagged in `special` / `specials`.",
+          "type": ["number", "integer", "string", "boolean", "array", "object", "null"]
+        },
+        "ref": { "$ref": "#/definitions/sidecarRef" },
+        "shape": {
+          "type": "array",
+          "description": "For MATRIXOFNUMBERS: [rows, cols]. For VECTOROFNUMBERS optional [length].",
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "special": {
+          "type": "string",
+          "description": "For a single non-finite NUMBER/INTEGER/DOUBLE whose `value` is null.",
+          "enum": ["NaN", "Infinity", "-Infinity"]
+        },
+        "specials": {
+          "type": "object",
+          "description": "For VECTOROFNUMBERS/MATRIXOFNUMBERS: map of flat element index (string) -> non-finite token. The corresponding array element is null.",
+          "additionalProperties": { "type": "string", "enum": ["NaN", "Infinity", "-Infinity"] }
+        },
+        "columns": {
+          "type": "object",
+          "description": "For a dataframe-like OBJECT serialized to a csv/parquet sidecar: maps column name -> FSK-ML dataType, preserving per-column logical types across the language boundary.",
+          "additionalProperties": { "$ref": "#/definitions/dataType" }
+        },
+        "partial": {
+          "type": "boolean",
+          "description": "For OBJECT: true if the object is not tabular and not fully JSON-serializable; `value`/`ref` then holds a best-effort extract and the run carries a warning."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "encoding": { "const": "inline" } } },
+          "then": { "required": ["value"] }
+        },
+        {
+          "if": { "properties": { "encoding": { "const": "ref" } } },
+          "then": { "required": ["ref"] }
+        }
+      ]
+    },
+    "sidecarRef": {
+      "type": "object",
+      "description": "Pointer to a value stored in a separate file next to the bundle (relative path on the shared work volume).",
+      "required": ["path", "format"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "description": "Path relative to the bundle file. Must not escape the bundle directory (no leading '/' or '..')." },
+        "format": { "type": "string", "enum": ["csv", "parquet", "json", "raw"], "description": "How the sidecar is encoded. 'raw' = opaque FILE payload." },
+        "mediaType": { "type": "string", "description": "IANA media type, e.g. text/csv, application/octet-stream." },
+        "header": { "type": "boolean", "description": "For csv: whether the first row is a header. Default false for MATRIXOFNUMBERS." }
+      }
+    }
+  }
+}

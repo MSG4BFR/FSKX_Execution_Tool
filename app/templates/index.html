@@ -12,6 +12,7 @@
       <h1>FSKX Runner</h1>
       <nav class="nav">
         <a href="{{ url_for('index') }}">⟳ Rescan</a>
+        <a href="{{ url_for('join_page') }}">🔗 Join models</a>
         <form method="post" action="{{ url_for('cleanup_all_route') }}" class="nav-form"
               onsubmit="return confirm('Remove ALL cached environments, AI images and stored run results? Each model will rebuild on its next run. Model files (.fskx) are kept.')">
           <button type="submit" class="linkbtn">🧹 Clean all caches</button>
