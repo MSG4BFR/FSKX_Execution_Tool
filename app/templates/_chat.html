@@ -3,12 +3,12 @@
      Optional: `chat_scope` (label text), `chat_run_ids` (list -> scopes results). -->
 <div class="card chatbox" style="margin-top:22px">
   <strong>Talk to this model</strong>
-  <div class="note">Ask Claude about this model — its metadata, paper, scripts and
+  <div class="note">Ask {{ ai_label }} about this model — its metadata, paper, scripts and
   documentation — and about {{ chat_scope if chat_scope is defined else 'its stored simulation results (all runs)' }}.
   Follow-up questions keep their context.</div>
 
   {% if not api_key_set %}
-    <p class="warn" style="margin-top:10px">⚠ Claude is not available — the chat is disabled.
+    <p class="warn" style="margin-top:10px">⚠ {{ ai_label }} is not available — the chat is disabled.
     {% if api_key_status is defined and api_key_status %}{{ api_key_status }}<br>{% endif %}
     Add or fix your key under <a href="{{ url_for('settings') }}">⚙ Settings</a> to talk to this model.</p>
   {% endif %}
@@ -22,7 +22,7 @@
     </div>
 
     <div class="chat-thinking statusline" style="display:none">
-      <span class="spinner"></span> <span>Claude is reading the model and results…</span>
+      <span class="spinner"></span> <span>{{ ai_label }} is reading the model and results…</span>
     </div>
 
     <form class="composer chat-composer">

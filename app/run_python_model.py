@@ -205,6 +205,31 @@ for key, val in list(ns.items()):
 
 with open(os.path.join(outdir, "results.json"), "w") as fh:
     json.dump(results, fh, default=str, indent=2)
+
+# Emit the typed interchange bundle (model-joining Phase 1): the model's declared
+# parameters (INPUT/CONSTANT/OUTPUT, each tagged with its classification), serialized in the
+# language-neutral format so another model can consume them. Best-effort — a serialization
+# failure becomes a warning, never a failed run.
+if status["ok"] and PLAN.get("serialize_params"):
+    try:
+        import interchange  # ships alongside this wrapper (see engine._sync_runners)
+        params = []
+        for spec in PLAN["serialize_params"]:
+            pid = spec.get("id")
+            if pid in ns:
+                params.append({**spec, "value": ns[pid]})
+            elif (spec.get("classification") or "") == "OUTPUT":
+                status["warnings"].append(
+                    f"declared OUTPUT '{pid}' not found in the model namespace; skipped")
+        _gen = {"tool": "FSKX Runner", "modelId": PLAN.get("model_id") or "",
+                "runId": os.path.basename(outdir)}
+        _, _w = interchange.write_bundle(params, outdir, generator_language="Python",
+                                         generated_by=_gen)
+        status["warnings"].extend(_w)
+    except Exception as exc:  # noqa: BLE001
+        status["warnings"].append("interchange bundle (outputs.json) not written: "
+                                  + _fmt_exc(exc))
+
 with open(os.path.join(outdir, "status.json"), "w") as fh:
     json.dump(status, fh, indent=2)
 

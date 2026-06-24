@@ -13,8 +13,8 @@
     <p class="sub">{{ name }} · {{ language|upper }}</p>
 
     <p class="desc">For models that need system software (JAGS, Stan, OpenBUGS, GDAL,
-    compilers…), Claude writes a tailored Dockerfile and a per-model image is built and
-    used to run the model.</p>
+    compilers…), {{ ai_label }} writes a tailored Dockerfile and a per-model image is built
+    and used to run the model.</p>
 
     {% if not docker %}
       <div class="card"><p class="err">The Docker backend isn't reachable from the app,
@@ -22,9 +22,9 @@
       (it mounts the Docker socket).</p></div>
     {% endif %}
     {% if not api_key_set %}
-      <div class="card"><p class="warn">No Claude API key set.</p>
-      <p class="note">Add one under <a href="{{ url_for('settings') }}">Settings</a> to
-      generate a Dockerfile.</p></div>
+      <div class="card"><p class="warn">{{ ai_label }} is not available.</p>
+      <p class="note">Configure the AI backend under <a href="{{ url_for('settings') }}">Settings</a>
+      to generate a Dockerfile.</p></div>
     {% endif %}
 
     <div class="row" style="gap:10px; margin:14px 0">

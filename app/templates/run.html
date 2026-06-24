@@ -22,7 +22,7 @@
       <div id="warnings"></div>
       <div id="aifix" style="display:none" class="card">
         <strong>Environment problem</strong>
-        <div class="note">The standard environment couldn't run this model. Claude can
+        <div class="note">The standard environment couldn't run this model. {{ ai_label }} can
         build a tailored Docker environment for it (system libraries and all).</div>
         <p style="margin-top:10px">
           <a class="btn" id="aifixBtn" href="#">Fix with AI</a>
@@ -78,7 +78,7 @@
         box.style.display = "block";
         document.getElementById("aifixBtn").href = "/ai/" + encodeURIComponent(d.fskx || "{{ job.fskx }}");
         {% if not api_key_set %}
-        document.getElementById("aifixHint").textContent = "— set your Claude API key in Settings first.";
+        document.getElementById("aifixHint").textContent = "— configure {{ ai_label }} in Settings first.";
         {% endif %}
       }
       const plots = document.getElementById("plots");

@@ -76,6 +76,16 @@ stored runs, on a single run's page (and on the result page shown right after a 
 that run, and on a comparison page just the runs you selected. This needs a Claude API key
 (Settings); without one the chat is greyed out.
 
+**Join models into a workflow.** Open **🔗 Join models** from the home page to chain several
+models so one model's output feeds another's input — even across languages (R ↔ Python). Add
+models as boxes on the canvas, drag them to arrange, then draw a connection by dragging from a
+model's output port (right) or input port (left) onto another model's input port; the numbered
+badge on each box shows the order it will run in, which the tool works out from the connections.
+You can add an optional unit transform on a connection, feed one shared constant to several
+models, then **Validate** and **Run** the whole chain — each model runs in turn and you can open
+its results. Pipelines can be **saved**, reloaded, and exported/imported as a single `.fskxp`
+file to share. (Loops — a model that ultimately feeds back into itself — aren't supported yet.)
+
 **Stop the tool.** Click **⏻ Quit** in the header on the home page to shut the server down
 cleanly — this also stops and removes its Docker container, so you don't have to find the
 terminal window or force-stop anything in Docker Desktop. (Closing the terminal window with

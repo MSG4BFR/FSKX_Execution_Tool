@@ -53,7 +53,8 @@ REM A hidden PowerShell helper polls /healthz (up to ~60s) and then opens the pa
 start "" /b powershell -NoProfile -WindowStyle Hidden -Command "$u='%URL%/healthz'; for($i=0;$i -lt 120;$i++){ try { Invoke-WebRequest -UseBasicParsing -Uri $u -TimeoutSec 2 | Out-Null; Start-Process '%URL%'; break } catch { Start-Sleep -Milliseconds 500 } }"
 
 REM Models folder mounted read-write (for repository downloads); Docker socket mounted
-REM so the AI-assisted feature can build and run per-model images.
-docker run --rm -p %PORT%:8000 -e ANTHROPIC_API_KEY -e FSKX_CLAUDE_MODEL -v "%MODELS_DIR%:/models" -v fskx_envs:/opt/conda/envs -v fskx_work:/work -v //var/run/docker.sock:/var/run/docker.sock %IMAGE%
+REM so the AI-assisted feature can build and run per-model images. The --add-host line lets
+REM the container reach a local LM Studio server on the host via host.docker.internal.
+docker run --rm -p %PORT%:8000 --add-host=host.docker.internal:host-gateway -e ANTHROPIC_API_KEY -e FSKX_CLAUDE_MODEL -e FSKX_AI_PROVIDER -e FSKX_LOCAL_API_URL -e FSKX_LOCAL_MODEL -v "%MODELS_DIR%:/models" -v fskx_envs:/opt/conda/envs -v fskx_work:/work -v //var/run/docker.sock:/var/run/docker.sock %IMAGE%
 
 endlocal

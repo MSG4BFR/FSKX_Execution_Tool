@@ -1,0 +1,167 @@
+"""
+pipeline_store.py — durable, named storage for model-joining pipelines (Phase 4).
+
+A saved pipeline is a small JSON record on the persistent work volume:
+
+    {"id", "name", "created", "modified", "pipeline": {<the join definition>}}
+
+stored at ``$FSKX_WORK_DIR/_pipelines/<id>.json`` — the same volume that already survives
+restarts (next to ``_results``), so saved joins persist with no database.
+
+A pipeline can also be EXPORTED as a self-contained ``.fskxp`` archive (a zip embedding the
+pipeline record + every member ``.fskx``), and re-IMPORTED elsewhere — the sharing path. The
+archive is intentionally a plain, inspectable zip with a ``manifest.json``; a fully
+OMEX-conformant manifest is a later refinement (see model-joining/phase-4).
+
+Pure stdlib; no Flask/engine import, so it is unit-testable in isolation.
+"""
+
+import json
+import os
+import shutil
+import tempfile
+import time
+import uuid
+import zipfile
+
+WORK_DIR = os.environ.get("FSKX_WORK_DIR", "/tmp/fskx_work")
+MODELS_DIR = os.environ.get("FSKX_MODELS_DIR", "/models")
+PIPELINES_DIR = os.path.join(WORK_DIR, "_pipelines")
+
+ARCHIVE_EXT = ".fskxp"
+ARCHIVE_FORMAT = "fskx-pipeline"
+ARCHIVE_VERSION = "1.0.0"
+
+
+def _ensure_dir():
+    os.makedirs(PIPELINES_DIR, exist_ok=True)
+
+
+def safe_id(pid):
+    """A stored id must be a bare token (guards the file path against traversal)."""
+    return bool(pid) and "/" not in pid and "\\" not in pid and ".." not in pid
+
+
+def _path(pid):
+    return os.path.join(PIPELINES_DIR, pid + ".json")
+
+
+def _now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def save(pipeline, name, pid=None):
+    """Create or update a named pipeline. Returns the stored record. Updating preserves the
+    original ``created`` timestamp."""
+    _ensure_dir()
+    created = _now()
+    if pid and safe_id(pid) and os.path.exists(_path(pid)):
+        existing = load(pid) or {}
+        created = existing.get("created", created)
+    else:
+        pid = uuid.uuid4().hex[:12]
+    record = {"id": pid, "name": (name or "Untitled pipeline").strip(),
+              "created": created, "modified": _now(), "pipeline": pipeline}
+    with open(_path(pid), "w", encoding="utf-8") as fh:
+        json.dump(record, fh, indent=2)
+    return record
+
+
+def load(pid):
+    if not safe_id(pid):
+        return None
+    p = _path(pid)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (ValueError, OSError):
+        return None
+
+
+def list_all():
+    """Summaries of all saved pipelines, newest-modified first."""
+    _ensure_dir()
+    out = []
+    for fn in os.listdir(PIPELINES_DIR):
+        if not fn.endswith(".json"):
+            continue
+        rec = load(fn[:-5])
+        if not rec:
+            continue
+        p = rec.get("pipeline", {})
+        out.append({"id": rec["id"], "name": rec["name"],
+                    "created": rec.get("created"), "modified": rec.get("modified"),
+                    "n_nodes": len(p.get("nodes", [])), "n_edges": len(p.get("edges", []))})
+    out.sort(key=lambda r: r.get("modified", ""), reverse=True)
+    return out
+
+
+def delete(pid):
+    if not safe_id(pid):
+        return False
+    p = _path(pid)
+    if os.path.exists(p):
+        try:
+            os.remove(p)
+            return True
+        except OSError:
+            return False
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Composite archive (export / import) — sharing a pipeline + its member models
+# ---------------------------------------------------------------------------
+
+def member_models(record):
+    return sorted({n["fskx"] for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")})
+
+
+def build_archive(pid, models_dir=None):
+    """Write a ``.fskxp`` archive for a saved pipeline. Returns (tmp_path, name) or None.
+    Embeds every member ``.fskx`` that exists in ``models_dir`` so the archive is
+    self-contained."""
+    record = load(pid)
+    if not record:
+        return None
+    models_dir = models_dir or MODELS_DIR
+    fd, tmp = tempfile.mkstemp(suffix=ARCHIVE_EXT)
+    os.close(fd)
+    members = member_models(record)
+    missing = []
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("pipeline.json", json.dumps(record, indent=2))
+        for f in members:
+            src = os.path.join(models_dir, f)
+            if os.path.exists(src):
+                z.write(src, "models/" + f)
+            else:
+                missing.append(f)
+        z.writestr("manifest.json", json.dumps({
+            "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION,
+            "name": record["name"], "models": members,
+            "missing_models": missing}, indent=2))
+    return tmp, record["name"]
+
+
+def import_archive(path, models_dir=None):
+    """Read a ``.fskxp`` archive: restore any member ``.fskx`` not already present, then save
+    the pipeline as a NEW record (fresh id). Returns the saved record. Guards zip entry paths
+    against traversal."""
+    models_dir = models_dir or MODELS_DIR
+    os.makedirs(models_dir, exist_ok=True)
+    with zipfile.ZipFile(path) as z:
+        record = json.loads(z.read("pipeline.json").decode("utf-8"))
+        for n in z.namelist():
+            if not (n.startswith("models/") and n.endswith(".fskx")):
+                continue
+            base = os.path.basename(n)
+            if not base or base != n[len("models/"):]:  # reject nested / traversal
+                continue
+            target = os.path.join(models_dir, base)
+            if not os.path.exists(target):
+                with z.open(n) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+    return save(record.get("pipeline", {}), record.get("name", "Imported pipeline"))

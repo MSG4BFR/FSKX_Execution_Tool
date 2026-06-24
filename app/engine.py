@@ -211,14 +211,19 @@ def render_value(field, submitted_value, language):
     return val  # numeric / vector expressions are passed through verbatim
 
 
-def write_param_script(model_dir, language, scenario_name, fields, submitted, work_dir):
+def write_param_script(model_dir, language, scenario_name, fields, submitted, work_dir,
+                       injected=None):
     """
     Write the generated parameter script: the scenario's base parameters first, then
-    user overrides appended (later assignment wins).
+    user overrides, then any JOINED parameters from upstream models (later assignment wins,
+    so the joined block — written last — always takes precedence over the form and scenario).
 
     The base comes from SED-ML (one assignment per changeAttribute) when available — the
     standard's source of truth. With no SED-ML we write the `simulations/` script
     verbatim, which preserves any non-assignment lines it may contain.
+
+    ``injected`` (model-joining) is an ordered ``{param_id: rhs_literal}`` mapping already
+    rendered in the target language by the pipeline; each becomes a final override line.
     """
     assign = " = " if language == "python" else " <- "
     sed = omex.sedml_scenarios(model_dir)
@@ -241,6 +246,11 @@ def write_param_script(model_dir, language, scenario_name, fields, submitted, wo
         rhs = render_value(f, submitted[f["id"]], language)
         lines.append(f"{f['id']}{assign}{rhs}")
 
+    if injected:
+        lines += ["", "### --- joined parameters (from upstream models) ---"]
+        for pid, rhs in injected.items():
+            lines.append(f"{pid}{assign}{rhs}")
+
     out_name = "params.py" if language == "python" else "params.R"
     out_path = os.path.join(work_dir, out_name)
     with open(out_path, "w", encoding="utf-8") as fh:
@@ -248,16 +258,53 @@ def write_param_script(model_dir, language, scenario_name, fields, submitted, wo
     return out_path
 
 
-def write_run_plan(work_dir, language, scripts):
+def serializable_param_specs(metadata):
+    """
+    The model's declared parameters, as light specs the wrappers use to emit the typed
+    interchange bundle (model-joining Phase 1). Each is
+    ``{id, dataType, classification, name, unit}``.
+
+    ALL classifications are serialized (INPUT, CONSTANT, OUTPUT), not just OUTPUT: a join
+    may source a model's *input* as well as its result (e.g. a shared parameter fanned out
+    to several models — see the "dream" slide). This is a bounded set (it comes from
+    metaData.json, never the full namespace), so capturing inputs/constants is cheap and
+    also improves provenance. `unit` is carried so a join can warn on unit mismatch and
+    apply an explicit conversion; it is never used for silent auto-conversion.
+    """
+    specs = []
+    for p in metadata.get("modelMath", {}).get("parameter", []) or []:
+        if not p.get("id"):
+            continue
+        specs.append({
+            "id": p["id"],
+            "dataType": (p.get("dataType") or "").upper(),
+            "classification": (p.get("classification") or "").upper(),
+            "name": p.get("name"),
+            "unit": p.get("unit"),
+        })
+    return specs
+
+
+def model_param_specs(fskx_name):
+    """All declared parameters of a model (id, dataType, classification, name, unit) — used
+    by the join builder to populate source/target port menus. Extraction is reused/cached."""
+    model_dir = extract_model(fskx_name)
+    return serializable_param_specs(load_metadata(model_dir))
+
+
+def write_run_plan(work_dir, language, scripts, metadata=None, model_id=None):
     """
     Write `_run_plan.json` so the in-environment wrapper knows the ACTUAL script names
-    (resolved from metadata.rdf / SED-ML / convention) instead of assuming model.<ext>.
+    (resolved from metadata.rdf / SED-ML / convention) instead of assuming model.<ext>,
+    and the declared parameters it should serialize into the interchange bundle.
     """
     plan = {
         "language": language,
         "param_script": "params.py" if language == "python" else "params.R",
         "model_script": scripts.get("model"),
         "visualization_script": scripts.get("visualization"),
+        "model_id": model_id,
+        "serialize_params": serializable_param_specs(metadata or {}),
     }
     with open(os.path.join(work_dir, "_run_plan.json"), "w", encoding="utf-8") as fh:
         json.dump(plan, fh)
@@ -283,7 +330,9 @@ def _sync_runners():
     immediately, with no per-model image rebuild.
     """
     os.makedirs(RUNNER_DIR, exist_ok=True)
-    for fn in ("run_python_model.py", "run_r_model.R"):
+    # The interchange modules ride along so the wrappers can `import interchange` /
+    # `source("interchange.R")` from the same directory in the sibling container.
+    for fn in ("run_python_model.py", "run_r_model.R", "interchange.py", "interchange.R"):
         try:
             shutil.copy2(os.path.join(APP_DIR, fn), os.path.join(RUNNER_DIR, fn))
         except OSError:
@@ -459,6 +508,7 @@ def list_runs(fskx_name):
             "language": meta.get("language"),
             "backend": meta.get("backend"),
             "params": meta.get("params", {}),
+            "injected": meta.get("injected", {}),
             "plots": plots,
             "files": files,
             "warnings": meta.get("warnings") or status.get("warnings", []),
@@ -487,17 +537,37 @@ def run_file_path(fskx_name, run_id, name):
     return path
 
 
-def execute(fskx_name, scenario_name, submitted_values, progress=None):
+def execute(fskx_name, scenario_name, submitted_values, progress=None, injections=None):
     """
     Full pipeline for one run. `progress` is an optional callable(str) for status
     updates. Returns a result dict consumed by the web UI.
+
+    ``injections`` (model-joining) maps a target INPUT id to
+    ``{"rhs": <literal>, "sidecars": [(src_abspath, dest_basename), ...]}``: a value taken
+    from an upstream model, already rendered in this model's language by the pipeline. The
+    bound ids are removed from the submitted form values (so the form can't compete) and the
+    rhs lines are written LAST in the param script (last-assignment-wins). Any sidecar files
+    (csv/parquet/raw backing a ref-encoded value) are copied into the model dir first so the
+    rendered read call resolves at run time.
     """
     def note(msg):
         if progress:
             progress(msg)
 
+    injections = injections or {}
+    submitted_values = dict(submitted_values or {})
+    for _tid in injections:
+        submitted_values.pop(_tid, None)  # a bound input never takes a form value
+
     note("Extracting archive…")
     model_dir = extract_model(fskx_name)
+
+    for _tid, _inj in injections.items():
+        for _src, _dest in _inj.get("sidecars", []):
+            try:
+                shutil.copy2(_src, os.path.join(model_dir, os.path.basename(_dest)))
+            except OSError as _exc:
+                note(f"warning: could not stage sidecar for '{_tid}': {_exc}")
 
     spec = depresolve.resolve(model_dir)
     language = spec["language"]
@@ -533,8 +603,11 @@ def execute(fskx_name, scenario_name, submitted_values, progress=None):
     assignments = scenario_assignments(model_dir, language, scenario_name)
     fields = build_param_fields(assignments, metadata)
 
-    write_param_script(model_dir, language, scenario_name, fields, submitted_values, model_dir)
-    write_run_plan(model_dir, language, scripts)
+    injected_rhs = {tid: inj["rhs"] for tid, inj in injections.items()}
+    write_param_script(model_dir, language, scenario_name, fields, submitted_values, model_dir,
+                       injected=injected_rhs)
+    model_id = (metadata.get("generalInformation", {}) or {}).get("identifier")
+    write_run_plan(model_dir, language, scripts, metadata=metadata, model_id=model_id)
 
     # Select backend; a micromamba build failure becomes an AI-fixable result.
     try:
@@ -589,6 +662,7 @@ def execute(fskx_name, scenario_name, submitted_values, progress=None):
         "backend": backend["type"],
         "ok": rc == 0,
         "params": submitted_values,
+        "injected": injected_rhs,  # {target_id: rendered RHS literal} from upstream models
         "plots": plots,
         "files": files,
         "warnings": status.get("warnings", []),
@@ -613,19 +687,20 @@ def execute(fskx_name, scenario_name, submitted_values, progress=None):
     }
 
 
-def ai_generate_dockerfile(fskx_name, api_key, model_id, error_log="", prev_dockerfile=""):
-    """Generate a Dockerfile for a model via Claude. Returns (tag, dockerfile_text)."""
+def ai_generate_dockerfile(fskx_name, cfg, error_log="", prev_dockerfile=""):
+    """Generate a Dockerfile for a model via the selected provider. Returns
+    (tag, dockerfile_text)."""
     import aienv
     model_dir = os.path.join(WORK_DIR, os.path.splitext(fskx_name)[0])
     if not os.path.isdir(model_dir):
         model_dir = extract_model(fskx_name)
     spec, dockerfile = aienv.generate_dockerfile(
-        model_dir, api_key, model_id, error_log=error_log,
+        model_dir, cfg, error_log=error_log,
         prev_dockerfile=prev_dockerfile)
     return aienv.image_tag(spec), dockerfile
 
 
-def chat_about_model(fskx_name, messages, api_key, model_id, run_ids=None):
+def chat_about_model(fskx_name, messages, cfg, run_ids=None):
     """Answer a conversation about a model and its stored results (see aienv).
 
     `run_ids` optionally scopes the results context to specific runs (the run being
@@ -635,7 +710,7 @@ def chat_about_model(fskx_name, messages, api_key, model_id, run_ids=None):
     model_dir = os.path.join(WORK_DIR, _model_base(fskx_name))
     if not os.path.isdir(model_dir):
         model_dir = extract_model(fskx_name)
-    return aienv.chat_about_model(model_dir, fskx_name, messages, api_key, model_id,
+    return aienv.chat_about_model(model_dir, fskx_name, messages, cfg,
                                   run_ids=run_ids)
 
 
