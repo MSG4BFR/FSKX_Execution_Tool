@@ -82,9 +82,27 @@ models as boxes on the canvas, drag them to arrange, then draw a connection by d
 model's output port (right) or input port (left) onto another model's input port; the numbered
 badge on each box shows the order it will run in, which the tool works out from the connections.
 You can add an optional unit transform on a connection, feed one shared constant to several
-models, then **Validate** and **Run** the whole chain — each model runs in turn and you can open
-its results. Pipelines can be **saved**, reloaded, and exported/imported as a single `.fskxp`
-file to share. (Loops — a model that ultimately feeds back into itself — aren't supported yet.)
+models, then **Validate** and **Run** the whole chain. While it runs, each box lights up live
+(running → done, or red on failure, with downstream boxes shown as blocked) and you can open any
+node's results.
+
+The workflow remembers what each node has already computed, so it works incrementally — like a
+small no-code workflow tool:
+
+- **Run** only re-executes what actually changed; everything still valid is reused from cache
+  (reused nodes show a **♻**). Use **↻ Force re-run all** to ignore the cache and run everything
+  fresh.
+- Hover a box for two actions: **▶ Execute up to here** runs just that node and any out-of-date
+  nodes feeding it (it's greyed out when the node is already up to date), and **↺ Reset** marks
+  that node and everything downstream as needing a re-run. Each box carries an at-rest badge —
+  green ✓ up-to-date, amber ● stale, ⊘ can't load.
+- Edit a node's parameters (or a connection) and the affected nodes automatically become stale,
+  so the next run recomputes exactly those and nothing else.
+
+Pipelines (the wiring) can be **saved**, reloaded, and exported/imported as a single `.fskxp`
+file to share. Separately, **💾 Save current state** snapshots which nodes have run and with
+which results; reload a saved state later to pick up exactly where you left off. (Loops — a model
+that ultimately feeds back into itself — aren't supported yet.)
 
 **Stop the tool.** Click **⏻ Quit** in the header on the home page to shut the server down
 cleanly — this also stops and removes its Docker container, so you don't have to find the

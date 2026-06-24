@@ -33,6 +33,7 @@ is unit-testable without Docker or a live model run.
 import hashlib
 import json
 import os
+import time
 
 import interchange
 
@@ -61,6 +62,15 @@ def _default_execute(fskx_name, scenario, params, injections, progress=None):
     import engine
     return engine.execute(fskx_name, scenario, params, progress=progress,
                           injections=injections)
+
+
+def _default_run_dir(fskx_name, run_id):
+    """Resolve a cached run's output folder (for reusing its outputs.json). Injectable so
+    execute_to/plan stay testable without engine/Docker."""
+    if not run_id:
+        return None
+    import engine
+    return engine.run_dir(fskx_name, run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -335,3 +345,279 @@ def run(pipeline, execute_fn=None, load_ctx=None, progress=None, validate_first=
         _emit(nid, "done", fskx=fskx, run_id=res.get("run_id"))
 
     return {"ok": True, "order": order, "results": results, "provenance": provenance}
+
+
+# ---------------------------------------------------------------------------
+# Partial execution — per-node caching + "execute up to here" (Phase B)
+#
+# A node's cached output is valid iff nothing that feeds it changed. We capture that as a
+# recursive content hash: cache_hash(n) = hash(config(n) + the injected-value hashes of n's
+# incoming edges). Because an edge's injected-value hash is derived from the upstream node's
+# outputs.json (+ the edge transform), changing a node's config, wiring, or any upstream output
+# changes its hash and every downstream hash — so dirty-propagation falls out of the cache.
+# See model-joining/phase-B-node-caching.md.
+# ---------------------------------------------------------------------------
+
+def _sha(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _shared_for(pipeline, node_id):
+    """The shared-parameter assignments targeting a node, normalised + sorted (config input)."""
+    out = []
+    for sp in pipeline.get("shared", []):
+        for tgt in sp.get("targets", []):
+            if tgt.get("node") == node_id:
+                out.append({"param": tgt.get("param"), "value": sp.get("value"),
+                            "dataType": sp.get("dataType")})
+    out.sort(key=lambda d: str(d.get("param")))
+    return out
+
+
+def config_hash(node, pipeline):
+    """Hash of a node's own configuration (model, scenario, params, shared) — independent of
+    upstream. Changing any of these invalidates the node (and, via cache_hash, downstream)."""
+    basis = json.dumps({
+        "fskx": node.get("fskx"),
+        "scenario": node.get("scenario"),
+        "params": node.get("params", {}),
+        "shared": _shared_for(pipeline, node["id"]),
+    }, sort_keys=True, default=str)
+    return _sha(basis)
+
+
+def cache_hash(node, pipeline, edge_input_hashes):
+    """Full content hash for a node: its config + the injected-value hash of each incoming edge
+    (``{target_param: hash}``)."""
+    edges_part = "|".join(sorted("%s=%s" % (k, v) for k, v in edge_input_hashes.items()))
+    return _sha(config_hash(node, pipeline) + "||" + edges_part)
+
+
+def _reverse_reachable(pipeline, targets):
+    """``targets`` plus all of their transitive ancestors (the subgraph that must be current
+    before the targets can run)."""
+    radj = {}
+    for e in pipeline.get("edges", []):
+        radj.setdefault(e["target"]["node"], []).append(e["source"]["node"])
+    seen, stack = set(), list(targets)
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        for y in radj.get(x, []):
+            if y not in seen:
+                stack.append(y)
+    return seen
+
+
+def descendants(pipeline, sources):
+    """``sources`` plus everything downstream of them (forward edge walk). Used by *reset*:
+    resetting a node also invalidates everything it feeds."""
+    fadj = {}
+    for e in pipeline.get("edges", []):
+        fadj.setdefault(e["source"]["node"], []).append(e["target"]["node"])
+    seen, stack = set(), list(sources)
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        for y in fadj.get(x, []):
+            if y not in seen:
+                stack.append(y)
+    return seen
+
+
+def _incoming(pipeline, node_id):
+    return [e for e in pipeline.get("edges", []) if e["target"]["node"] == node_id]
+
+
+def _build_incoming(pipeline, node_id, language, source_dir_of):
+    """Build the injection dict + per-edge value hashes + provenance for a node, reading each
+    source parameter from its (cached or fresh) run dir. ``source_dir_of(src_node)`` returns the
+    output dir for a source node, or None if unavailable. Raises LookupError if a source is not
+    ready or a param/data is missing."""
+    injections, edge_hashes, provenance = {}, {}, []
+    for e in _incoming(pipeline, node_id):
+        src_nid, src_pid = e["source"]["node"], e["source"]["param"]
+        sdir = source_dir_of(src_nid)
+        if not sdir:
+            raise LookupError("source '%s' not ready" % src_nid)
+        data = _source_param_data(sdir, src_pid)
+        if data is None:
+            raise LookupError("source param '%s.%s' not in outputs.json" % (src_nid, src_pid))
+        inj = build_injection(language, data, sdir, e.get("transform"), e["target"]["param"])
+        injections[e["target"]["param"]] = inj
+        edge_hashes[e["target"]["param"]] = _hash(inj["rhs"])
+        provenance.append({
+            "target": e["target"], "source": e["source"],
+            "transform": e.get("transform"), "value_hash": _hash(inj["rhs"]),
+        })
+    return injections, edge_hashes, provenance
+
+
+def _add_shared(pipeline, node_id, language, injections):
+    for sp in pipeline.get("shared", []):
+        for tgt in sp.get("targets", []):
+            if tgt.get("node") != node_id:
+                continue
+            d = interchange.encode_value(sp.get("value"), sp.get("dataType", "STRING"))
+            injections[tgt["param"]] = {"rhs": interchange.render_rhs(d, language),
+                                        "sidecars": []}
+
+
+def _cache_valid(prev, ch, fskx, run_dir_fn):
+    """True iff a recorded state entry is reusable: same hash, ok, and its run folder +
+    outputs.json still exist."""
+    if not (prev and prev.get("ok") and prev.get("cache_hash") == ch and prev.get("run_id")):
+        return None
+    d = run_dir_fn(fskx, prev["run_id"])
+    if d and os.path.exists(os.path.join(d, "outputs.json")):
+        return d
+    return None
+
+
+def execute_to(pipeline, targets, state=None, execute_fn=None, load_ctx=None,
+               run_dir_fn=None, progress=None, on_node=None, validate_first=True):
+    """
+    Execute only what is needed to bring ``targets`` (a list of node ids) up to date: their
+    stale ancestors run, valid caches are reused. Returns a record like ``run`` plus
+    ``state`` (the updated node-state map), ``ran`` and ``reused`` id lists. ``on_node`` is
+    called with phase ``start``/``done``/``failed`` for executed nodes and ``cached`` for reused
+    ones.
+    """
+    execute_fn = execute_fn or _default_execute
+    load_ctx = load_ctx or _default_load_ctx
+    run_dir_fn = run_dir_fn or _default_run_dir
+    state = dict(state or {})
+
+    def _emit(nid, phase, **info):
+        if on_node:
+            try:
+                on_node(nid, phase, info)
+            except Exception:  # noqa: BLE001
+                pass
+
+    if validate_first:
+        errors, _warn = validate(pipeline, load_ctx=load_ctx)
+        if errors:
+            return {"ok": False, "stage": "validate", "errors": errors,
+                    "results": {}, "provenance": [], "state": state, "ran": [], "reused": []}
+
+    nodes = {n["id"]: n for n in pipeline["nodes"]}
+    missing = [t for t in targets if t not in nodes]
+    if missing:
+        return {"ok": False, "stage": "validate", "results": {}, "provenance": [],
+                "state": state, "ran": [], "reused": [],
+                "errors": ["unknown target node(s): " + ", ".join(missing)]}
+
+    needed = _reverse_reachable(pipeline, targets)
+    order = [nid for nid in topo_order(pipeline) if nid in needed]
+    results, provenance, ran, reused = {}, [], [], []
+
+    def note(msg):
+        if progress:
+            progress(msg)
+
+    def source_dir_of(src_nid):
+        r = results.get(src_nid)
+        return r.get("outdir") if (r and r.get("ok")) else None
+
+    for nid in order:
+        node = nodes[nid]
+        fskx = node["fskx"]
+        language, _pidx = load_ctx(fskx)
+        try:
+            injections, edge_hashes, prov = _build_incoming(pipeline, nid, language, source_dir_of)
+        except LookupError as exc:
+            _emit(nid, "failed", fskx=fskx)
+            return {"ok": False, "stage": "run", "failed_node": nid,
+                    "errors": ["node '%s': %s" % (nid, exc)], "results": results,
+                    "provenance": provenance, "state": state, "ran": ran, "reused": reused}
+        provenance.extend(prov)
+        ch = cache_hash(node, pipeline, edge_hashes)
+
+        cached_dir = _cache_valid(state.get(nid), ch, fskx, run_dir_fn)
+        if cached_dir:
+            results[nid] = {"ok": True, "outdir": cached_dir, "fskx": fskx,
+                            "run_id": state[nid]["run_id"], "cached": True}
+            reused.append(nid)
+            _emit(nid, "cached", fskx=fskx, run_id=state[nid]["run_id"])
+            continue
+
+        _add_shared(pipeline, nid, language, injections)
+        _emit(nid, "start", fskx=fskx)
+        note("Running node '%s' (%s)…" % (nid, fskx))
+        res = execute_fn(fskx, node.get("scenario"), dict(node.get("params", {})),
+                         injections, progress)
+        res.setdefault("fskx", fskx)
+        results[nid] = res
+        state[nid] = {"run_id": res.get("run_id"), "cache_hash": ch,
+                      "ok": bool(res.get("ok")), "executed_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        if not res.get("ok"):
+            _emit(nid, "failed", fskx=fskx, run_id=res.get("run_id"))
+            return {"ok": False, "stage": "run", "failed_node": nid,
+                    "errors": ["node '%s' failed: see its log" % nid], "results": results,
+                    "provenance": provenance, "state": state, "ran": ran, "reused": reused}
+        ran.append(nid)
+        _emit(nid, "done", fskx=fskx, run_id=res.get("run_id"))
+
+    return {"ok": True, "order": order, "results": results, "provenance": provenance,
+            "state": state, "ran": ran, "reused": reused, "targets": list(targets)}
+
+
+def plan(pipeline, targets=None, state=None, load_ctx=None, run_dir_fn=None):
+    """Dry-run: without executing, report per node whether the next ``execute_to`` would
+    ``reuse`` its cache, ``run`` it, or finds it ``blocked`` (model won't load). Conservative —
+    a node downstream of one that will run is reported ``run``. ``targets`` defaults to every
+    node (full-graph status, for canvas badges)."""
+    load_ctx = load_ctx or _default_load_ctx
+    run_dir_fn = run_dir_fn or _default_run_dir
+    state = state or {}
+    nodes = {n["id"]: n for n in pipeline.get("nodes", [])}
+    if targets is None:
+        targets = list(nodes.keys())
+    try:
+        order = [nid for nid in topo_order(pipeline)
+                 if nid in _reverse_reachable(pipeline, targets)]
+    except PipelineError:
+        return {nid: "blocked" for nid in nodes}
+
+    out, will_run, cached_dirs = {}, set(), {}
+    for nid in order:
+        node = nodes[nid]
+        fskx = node["fskx"]
+        try:
+            language, _pidx = load_ctx(fskx)
+        except Exception:  # noqa: BLE001
+            out[nid] = "blocked"
+            will_run.add(nid)
+            continue
+        # any source that will run (or isn't cached/clean) makes this node run conservatively
+        edge_hashes, conservative = {}, False
+        for e in _incoming(pipeline, nid):
+            src = e["source"]["node"]
+            if src in will_run or src not in cached_dirs:
+                conservative = True
+                break
+            data = _source_param_data(cached_dirs[src], e["source"]["param"])
+            if data is None:
+                conservative = True
+                break
+            inj = build_injection(language, data, cached_dirs[src],
+                                  e.get("transform"), e["target"]["param"])
+            edge_hashes[e["target"]["param"]] = _hash(inj["rhs"])
+        if conservative:
+            out[nid] = "run"
+            will_run.add(nid)
+            continue
+        ch = cache_hash(node, pipeline, edge_hashes)
+        cached_dir = _cache_valid(state.get(nid), ch, fskx, run_dir_fn)
+        if cached_dir:
+            out[nid] = "reuse"
+            cached_dirs[nid] = cached_dir
+        else:
+            out[nid] = "run"
+            will_run.add(nid)
+    return out

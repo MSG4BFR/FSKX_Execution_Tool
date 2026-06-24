@@ -9,6 +9,10 @@ open work. Start here in a new session.
 > [phase-0](phase-0-interchange-spec.md) · [phase-1](phase-1-serialization-layer.md) ·
 > [phase-2](phase-2-pipeline-engine.md) · [phase-3](phase-3-ui-and-dag.md) ·
 > [phase-4](phase-4-packaging.md)
+>
+> **Next arc:** the project is evolving from a DAG *runner* into a **live, stateful workflow
+> engine** (KNIME-like). Roadmap + decision record: [workflow-engine.md](workflow-engine.md);
+> first phase planned: [phase-A — run history](phase-A-run-history.md).
 
 ---
 
@@ -47,9 +51,15 @@ just needed a typed interchange format and an orchestration layer that injects v
   `__import__('json')` so they assume nothing about the target model's imports.
 - **No silent unit conversion.** Units travel with values; a mismatch warns; conversion is
   explicit per-edge (`{scale, offset}` or `{expression}`).
-- **Injectable seams for testability.** `pipeline.validate(..., load_ctx=)` and
-  `pipeline.run(..., execute_fn=, load_ctx=, on_node=)` let the orchestration be tested
-  without Docker or real model runs.
+- **Injectable seams for testability.** `pipeline.validate(..., load_ctx=)`,
+  `pipeline.run(..., execute_fn=, load_ctx=, on_node=)` and
+  `pipeline.execute_to(..., execute_fn=, load_ctx=, run_dir_fn=, on_node=)` let the orchestration
+  be tested without Docker or real model runs.
+- **Caching is content-based, not timestamp-based (Phase B).** A node's cache is valid iff its
+  recomputed `cache_hash` matches the stored one and its run folder still exists; when in doubt
+  (missing folder, unresolved upstream) treat as stale and run — never reuse a possibly-wrong
+  cache. **Reset forgets associations; it never deletes `_results` artifacts** (history still
+  references them).
 
 ---
 
@@ -109,6 +119,40 @@ just needed a typed interchange format and an orchestration layer that injects v
   export / import).
 - `tests/test_pipeline_store.py` (18 checks — incl. OMEX manifest well-formedness + back-compat).
 
+### Stateful Workflow Engine arc — Phases A & B ✅ (the tool is becoming KNIME-like)
+> Roadmap + decision record: **[workflow-engine.md](workflow-engine.md)**. Phases C–E are
+> planned. Both A and B are **live-verified** by the user (browser + Docker).
+
+**Phase A — workflow run history → manual save-state** (`phase-A-run-history.md`).
+- `app/pipeline_runs.py` — records under `$FSKX_WORK_DIR/_pipeline_runs/<id>.json` that only
+  **reference** the per-node `_results` runs (never copy artifacts) + embed the wiring snapshot.
+- **Manual, not auto** (revised in B per user feedback): a record is saved by the user via
+  **💾 Save current state**; it carries the per-node run refs *and* the raw `node_state` (cache
+  hashes), so loading it **restores the working state** (`/api/pipeline/restore-state`) — not
+  just a visual replay. Legacy auto-saved records (no `node_state`) still replay.
+  `build_record` (from an exec result) + `build_record_from_state` (manual snapshot).
+- `app/server.py` — `/api/pipeline-runs` (GET), `/save` (POST), `/<id>` (GET), `/<id>/delete`,
+  `/api/pipeline/restore-state`. `app/templates/join.html` — "Saved states" bar.
+- `tests/test_pipeline_runs.py` (~18 checks).
+
+**Phase B — per-node caching + "execute up to here"** (`phase-B-node-caching.md`).
+- `app/pipeline.py` — **content-hash caching**: `config_hash` + `cache_hash(node) =
+  hash(config + injected-value hashes of incoming edges)` → a *recursive* hash, so a config,
+  wiring, or upstream-output change invalidates a node and everything downstream automatically.
+  `execute_to(targets, state)` runs only the needed subgraph, reusing valid caches (emits a
+  `cached` on_node phase); `plan(...)` is a no-execute dry-run (reuse/run/blocked);
+  `_reverse_reachable` (ancestors) + `descendants` (reset scope). **`run()` is unchanged.**
+- `app/workflow_state.py` — per-workflow node-state map under `_workflow_state/<wid>.json`
+  (`{nid: {run_id, cache_hash, ok}}`); reset forgets node + downstream (never deletes artifacts).
+- `app/server.py` — `/api/pipeline/run` is now **cache-aware** (targets = all; `force` ignores
+  cache); new `/execute-node`, `/reset-node`, `/plan`. `app/templates/join.html` — hover
+  **▶ Execute-up-to-here** (disabled when the node is up-to-date) / **↺ Reset** per node,
+  **↻ Force re-run all**, at-rest plan badges (clean ✓ / stale ● / blocked ⊘), live **cached ♻**.
+- `tests/test_workflow_state.py` (11) + a Phase-B block in `tests/test_pipeline.py`.
+- **Open scope (→ Phase C):** node-state is keyed by a per-draft/saved `workflow_id` side file;
+  it is **not yet** part of the saved `pipeline.json` definition or the `.fskxp` export. Saving
+  an unsaved draft as a named pipeline starts a fresh state key.
+
 ---
 
 ## 4. How to run & test
@@ -121,13 +165,18 @@ home page → **🔗 Join models**.
 ```
 python3 -m py_compile app/*.py
 python3 tests/test_interchange.py
-python3 tests/test_pipeline.py
+python3 tests/test_pipeline.py          # incl. Phase-B caching/execute_to/plan
 python3 tests/test_pipeline_store.py
+python3 tests/test_pipeline_runs.py     # Phase A: history / save-state records
+python3 tests/test_workflow_state.py    # Phase B: node-state store
 ```
 
-All three pass in a plain Python env with `pandas` + `jsonschema` installed. The Python model
-path is exercised; **the R writer and any real Docker-backed run must be validated on a
-machine with Docker + R** (see DEVELOPER.md §7) — the dev sandbox has neither.
+All pass in a plain Python env with `pandas` + `jsonschema` installed. The Python model path is
+exercised; **the R writer and any real Docker-backed run must be validated on a machine with
+Docker + R** (see DEVELOPER.md §7) — the dev sandbox has neither. (Tip for the next session: the
+engine seams `execute_fn` / `load_ctx` / `run_dir_fn` can be stubbed to drive the real
+`execute_to`/`plan` through the Flask routes without Docker — see the session log's integration
+checks.)
 
 ---
 
@@ -165,21 +214,16 @@ machine with Docker + R** (see DEVELOPER.md §7) — the dev sandbox has neither
      allows any classification as a source.
    - **Ports collapse when a column exceeds `PORT_CAP` (6):** connected ports are always shown,
      the rest hide behind a "+ N more…" toggle, so a wired port never detaches from its wire.
-3a. **Live, animated run status on the canvas.** *(User idea — the join builder is effectively
-    a small workflow engine, so the canvas should come alive while the pipeline runs.)* During a
-    run, reflect each node's state **on its box in the graph**: pending → running → done →
-    failed, ideally animated (e.g. a pulsing/spinner ring on the executing node, a travelling
-    dash along edges whose value has just been produced, a green check / red cross on
-    completion). The data is already there — `pipeline.run`'s `on_node(nid, phase, info)` hook
-    feeds `/api/pipeline/status/<job>`, which the page already polls for the (plain-list) node
-    states and provenance; this TODO is about **rendering those phases onto the canvas nodes**
-    instead of (or alongside) the current text list under "Run". Be honest about **failure**:
-    a failed node should be visually unmistakable, the downstream nodes it blocked shown as
-    "skipped/blocked" (not silently pending), and the failing node link straight to its run log.
-    Mostly front-end on top of the existing `on_node`/status contract; a richer animation might
-    tempt a graph library, but the current dependency-free SVG layer can do pulses (CSS
-    keyframes on the node box) and edge dash-offset animation without one — try it ourselves
-    first. Keep node identity stable during a run so status maps cleanly to boxes.
+3a. ~~**Live, animated run status on the canvas.**~~ ✅ DONE. The canvas drives node state live
+    during a run — pending → running (pulsing accent ring + spinner glyph) → done (✓, links to
+    results) → failed (red ring, ✕, links to the run log). Honest failure: downstream nodes are
+    marked **blocked** (dashed/dimmed) and unrun non-downstream nodes **skipped**, both derived
+    client-side from `failed_node` + edge reachability (`downstreamOf`/`computeRunStates`).
+    Edges from a completed source animate a travelling green dash, settling solid when finished;
+    edges into blocked/skipped nodes dim red. All dependency-free SVG/CSS in `join.html` on top
+    of the existing `on_node`/`/api/pipeline/status` contract — no backend change, no graph
+    library. The `computeRunStates`/`applyRunState` renderer is reused by
+    [phase-A](phase-A-run-history.md) to **replay a finished run** loaded from history.
 
 ### Correctness / completeness
 4. **Docker + R end-to-end verification.** Run a real two-model join across R↔Python and a
@@ -223,21 +267,28 @@ machine with Docker + R** (see DEVELOPER.md §7) — the dev sandbox has neither
 
 ## 6. Suggested sequencing for the next session
 
-1. **Docker/R end-to-end verification (#4)** — confirms the live R writer and sidecar staging
-   before more is built on top; do it on a Docker+R machine with the bundled BUGS/JAGS and an
-   R↔Python pair. Also a first live pass over the new canvas (pointer interactions vs. real
-   model ports) — it's only been static/headless-checked here (no browser/Docker in the dev box).
-2. **Scenario-per-node (#2)** — small, high user value, unblocks realistic multi-scenario
-   pipelines. ~1 file of UI + a field through two functions.
-3. **Live, animated run status on the canvas (#3a)** — the natural next UX step now that the
-   graph exists: drive node boxes from the `on_node`/status phases (running/done/failed,
-   animated), with honest failure/blocked rendering. Front-end on the existing contract.
-4. **OMEX-conformant manifest (#1)** + **reference archive (#6)** — standards alignment for
-   sharing, once the format has seen real use.
-5. Polish items (#7, #11, #12) as time allows.
+**Primary: Phase C — persistent live node state** ([workflow-engine.md](workflow-engine.md)).
+Promote the Phase-B `_workflow_state/<wid>.json` side file into a *first-class part of the saved
+workflow*: persist node-state inside the saved `pipeline.json` record (and the `.fskxp` export),
+and migrate a draft's state to the new id when an unsaved draft is saved (today it starts a fresh
+key — see §3 "Open scope"). This makes "save the workflow" also save its execution state, and
+sharing a `.fskxp` carries the cached results' identity.
 
-✅ Done this session: **Drag-and-drop canvas (#3)** — the biggest UX win; the API/JSON contract
-stayed stable and tested.
+Then, in rough priority:
+1. **Phase D — parallel independent branches:** a readiness scheduler + bounded worker pool over
+   `execute_to` (nodes with no path between them run concurrently; data-safe already via per-node
+   isolation). Needs a max-parallelism cap and concurrent status aggregation (`on_node` + lock).
+2. **Phase E — staleness polish:** include model *version* in `cache_hash`; non-numeric transform
+   guard (#9); richer pre-execute "what will run" UX; transform edge cases (#12).
+3. **Docker/R end-to-end (#4)** — still the one true gap: a real R↔Python join with a ref-backed
+   (dataframe→OBJECT) value, exercising the live R writer + sidecar staging.
+4. **Scenario-per-node (#2)** — small, high value; `node.scenario` already threads through
+   `engine.execute`. Now also relevant to `cache_hash` (scenario already in `config_hash`).
+5. Standards/polish: reference archive (#6), known-units suggestion (#7), validation ergonomics
+   (#11).
+
+✅ Done recent sessions: animated run status (#3a), **Phase A** (run history → manual save-state),
+**Phase B** (per-node caching + execute-up-to-here). Both A & B live-verified by the user.
 
 Keep every change behind the invariants in §2 and add/extend a test in the matching
 `tests/test_*.py` — the stubbed seams mean most logic is testable without Docker.
@@ -251,8 +302,9 @@ Keep every change behind the invariants in §2 and add/extend a test in the matc
 | Format | `INTERCHANGE_SPEC.md`, `interchange-schema.json` | — |
 | Serialization | `app/interchange.py`, `app/interchange.R` | `app/run_python_model.py`, `app/run_r_model.R` |
 | Engine | — | `app/engine.py` (specs, run-plan, execute injections, run-meta, sync) |
-| Pipeline | `app/pipeline.py`, `app/pipeline_store.py` | — |
-| Server | — | `app/server.py` (join + pipeline + persistence routes) |
-| UI | `app/templates/join.html` (node-graph canvas), `app/templates/_canvas_preview.html` (standalone demo) | `app/templates/index.html`, `app/templates/run_view.html` |
-| Tests | `tests/test_interchange.py`, `tests/test_pipeline.py`, `tests/test_pipeline_store.py` | — |
-| Docs | `model-joining/` (this folder) | — |
+| Pipeline | `app/pipeline.py` (+ Phase B: `execute_to`/`plan`/`cache_hash`/`descendants`), `app/pipeline_store.py` | — |
+| Stateful workflow (A/B) | `app/pipeline_runs.py` (history / save-state), `app/workflow_state.py` (node-state) | — |
+| Server | — | `app/server.py` (join, pipeline run/execute-node/reset-node/plan, history save/restore, persistence) |
+| UI | `app/templates/join.html` (node-graph canvas + per-node execute/reset + saved-states bar), `app/templates/_canvas_preview.html` (standalone demo) | `app/templates/index.html`, `app/templates/run_view.html` |
+| Tests | `tests/test_interchange.py`, `tests/test_pipeline.py`, `tests/test_pipeline_store.py`, `tests/test_pipeline_runs.py`, `tests/test_workflow_state.py` | — |
+| Docs | `model-joining/` — incl. `workflow-engine.md`, `phase-A-run-history.md`, `phase-B-node-caching.md` | — |
