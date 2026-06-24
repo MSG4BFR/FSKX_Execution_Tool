@@ -36,6 +36,13 @@ Node-graph canvas (current, dependency-free — no library):
   and a maximize toggle; Auto-layout arranges by dependency depth then fits.
 - The old row-based **table editor + parameter forms** are preserved under a collapsible
   "Advanced editor" — both bind to the same `nodes`/`edges` arrays as the canvas.
+- **Two-view live sync** — the canvas edge panel and the table are two views of the same edge.
+  Transform-value inputs (scale / offset / expression) edit via `edgeRaw`, which deliberately
+  avoids a full re-render so the focused input keeps its cursor. Each such input carries
+  `data-ei`/`data-ek` tags and `edgeRaw` pushes the new value into the matching *sibling* input
+  (skipping the active one), so editing a transform on the canvas reflects in the table
+  immediately and vice-versa — no save/refresh needed. (Fixed a bug where the table lagged
+  until the next save or "Add connection".)
 
 Remaining for later: scenario selection per node (TODO #2), and the live/animated run-status
 overlay on the canvas (HANDOFF TODO).

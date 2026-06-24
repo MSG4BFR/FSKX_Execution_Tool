@@ -23,8 +23,10 @@ from flask import (Flask, abort, jsonify, redirect, render_template,
 import aienv
 import engine
 import pipeline
+import pipeline_runs
 import pipeline_store
 import repo
+import workflow_state
 
 app = Flask(__name__)
 
@@ -450,35 +452,124 @@ def api_pipeline_validate():
     return jsonify({"errors": errors, "warnings": warnings})
 
 
-def _pipeline_job(job_id, p):
+def _pipeline_exec_job(job_id, p, run_id, targets, workflow_id=None, force=False,
+                       name=None, pipeline_id=None):
+    """Run a (possibly partial) execution via the caching engine: only ``targets`` and their
+    stale ancestors run, valid caches are reused. Persists the updated node-state map and a
+    Phase-A history record."""
     def on_node(nid, phase, info):
         with JOBS_LOCK:
             nodes = JOBS[job_id].setdefault("nodes", {})
             nodes[nid] = {"phase": phase, **info}
+    state = {} if force else workflow_state.load(workflow_id)
     try:
-        rec = pipeline.run(p, progress=_progress(job_id), on_node=on_node)
-        _set(job_id, state=("done" if rec.get("ok") else "error"), result=rec,
-             message=("Pipeline finished." if rec.get("ok") else
-                      "Pipeline failed: " + "; ".join(rec.get("errors", []) or ["see logs"])))
+        rec = pipeline.execute_to(p, targets, state=state,
+                                  progress=_progress(job_id), on_node=on_node)
     except Exception as exc:  # noqa: BLE001
         import traceback
         _set(job_id, state="error", error=traceback.format_exc(),
              message=f"Pipeline failed: {exc}")
+        return
+    # Persist the updated execution state *before* announcing done, so the UI never sees a
+    # finished run whose node-state isn't yet readable. History records are NOT auto-saved —
+    # the user saves a state snapshot explicitly (see /api/pipeline-runs/save). Best-effort.
+    try:
+        workflow_state.save(workflow_id, rec.get("state", state))
+    except Exception:  # noqa: BLE001
+        pass
+    n_ran, n_reused = len(rec.get("ran", [])), len(rec.get("reused", []))
+    if rec.get("ok"):
+        msg = "Done — %d run, %d reused from cache." % (n_ran, n_reused)
+    else:
+        msg = "Pipeline failed: " + "; ".join(rec.get("errors", []) or ["see logs"])
+    _set(job_id, state=("done" if rec.get("ok") else "error"), result=rec, message=msg)
+
+
+def _start_exec(p, targets, workflow_id, force, name, pipeline_id):
+    job_id = _new_job("pipeline")
+    run_id = pipeline_runs.new_run_id()
+    with JOBS_LOCK:
+        JOBS[job_id]["nodes"] = {}
+        JOBS[job_id]["pipeline_run_id"] = run_id
+    threading.Thread(target=_pipeline_exec_job, args=(job_id, p, run_id, targets),
+                     kwargs={"workflow_id": workflow_id, "force": force,
+                             "name": name, "pipeline_id": pipeline_id}, daemon=True).start()
+    return jsonify({"job_id": job_id, "pipeline_run_id": run_id})
 
 
 @app.route("/api/pipeline/run", methods=["POST"])
 def api_pipeline_run():
-    p = request.get_json(force=True, silent=True) or {}
+    """Cache-aware whole-graph run: every node is a target, so only stale nodes execute and
+    valid caches are reused. ``force=true`` ignores the cache (re-run all from scratch)."""
+    body = request.get_json(force=True, silent=True) or {}
+    # Accept either a bare pipeline (legacy) or {pipeline, name, pipeline_id, workflow_id, force}.
+    wrapped = "pipeline" in body
+    p = (body.get("pipeline") if wrapped else body) or {}
+    name = body.get("name") if wrapped else None
+    pipeline_id = body.get("pipeline_id") if wrapped else None
+    workflow_id = body.get("workflow_id") if wrapped else None
+    force = bool(body.get("force")) if wrapped else False
     if not p.get("nodes"):
         return jsonify({"error": "Add at least one model node."}), 400
     errors, _warn = pipeline.validate(p)
     if errors:
         return jsonify({"error": "Cannot run: " + "; ".join(errors)}), 400
-    job_id = _new_job("pipeline")
-    with JOBS_LOCK:
-        JOBS[job_id]["nodes"] = {}
-    threading.Thread(target=_pipeline_job, args=(job_id, p), daemon=True).start()
-    return jsonify({"job_id": job_id})
+    targets = [n["id"] for n in p["nodes"]]
+    return _start_exec(p, targets, workflow_id, force, name, pipeline_id)
+
+
+@app.route("/api/pipeline/execute-node", methods=["POST"])
+def api_pipeline_execute_node():
+    """Execute one or more nodes 'up to here': run the targets and only their stale ancestors,
+    reusing valid caches. Body: {pipeline, targets:[nid], workflow_id, name?, pipeline_id?}."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    targets = body.get("targets") or []
+    if not p.get("nodes"):
+        return jsonify({"error": "Add at least one model node."}), 400
+    if not targets:
+        return jsonify({"error": "No node selected to execute."}), 400
+    errors, _warn = pipeline.validate(p)
+    if errors:
+        return jsonify({"error": "Cannot run: " + "; ".join(errors)}), 400
+    return _start_exec(p, targets, body.get("workflow_id"), bool(body.get("force")),
+                       body.get("name"), body.get("pipeline_id"))
+
+
+@app.route("/api/pipeline/reset-node", methods=["POST"])
+def api_pipeline_reset_node():
+    """Reset a node + everything downstream of it (forget their cached executions; artifacts in
+    _results are NOT deleted). Body: {pipeline, node, workflow_id}."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    node = body.get("node")
+    if not node:
+        return jsonify({"error": "No node given."}), 400
+    targets = sorted(pipeline.descendants(p, [node]))
+    workflow_state.reset(body.get("workflow_id"), targets)
+    return jsonify({"ok": True, "reset": targets})
+
+
+@app.route("/api/pipeline/plan", methods=["POST"])
+def api_pipeline_plan():
+    """Dry-run: per node, whether the next execute would reuse the cache, run, or is blocked —
+    plus the executed-state summary (run ids) for canvas badges + result links. Body:
+    {pipeline, workflow_id}."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    wid = body.get("workflow_id")
+    if not p.get("nodes"):
+        return jsonify({"plan": {}, "state": {}})
+    state = workflow_state.load(wid)
+    fskx_of = {n["id"]: n.get("fskx") for n in p["nodes"]}
+    try:
+        pmap = pipeline.plan(p, state=state)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"plan": {}, "state": {}, "error": str(exc)})
+    state_nodes = {nid: {"run_id": s.get("run_id"), "ok": s.get("ok"),
+                         "fskx": fskx_of.get(nid)}
+                   for nid, s in state.items()}
+    return jsonify({"plan": pmap, "state": state_nodes})
 
 
 @app.route("/api/pipeline/status/<job_id>")
@@ -488,13 +579,15 @@ def api_pipeline_status(job_id):
         if not job:
             abort(404)
         payload = {"state": job["state"], "message": job["message"],
-                   "nodes": job.get("nodes", {})}
+                   "nodes": job.get("nodes", {}),
+                   "pipeline_run_id": job.get("pipeline_run_id")}
         r = job.get("result")
         if r:
             payload.update({
                 "ok": r.get("ok"), "order": r.get("order", []),
                 "provenance": r.get("provenance", []),
                 "errors": r.get("errors", []), "failed_node": r.get("failed_node"),
+                "ran": r.get("ran", []), "reused": r.get("reused", []),
             })
             payload["results"] = {
                 nid: {"ok": res.get("ok"), "run_id": res.get("run_id"),
@@ -505,6 +598,65 @@ def api_pipeline_status(job_id):
         if job.get("error"):
             payload["error"] = job["error"]
     return jsonify(payload)
+
+
+# ---------------------------------------------------------------------------
+# Saved states — durable, *manually saved* snapshots of a workflow's node executions
+# (stateful-workflow Phase A, now manual per user request). A record references the per-node
+# model runs in _results AND carries the raw node-state (cache hashes) so loading one restores
+# the working state — caching/reset keep functioning. See model-joining/phase-A-run-history.md.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/pipeline-runs", methods=["GET"])
+def api_pipeline_runs_list():
+    return jsonify(pipeline_runs.list_runs())
+
+
+@app.route("/api/pipeline-runs/save", methods=["POST"])
+def api_pipeline_runs_save():
+    """Manually save the current workflow's node-state as a named snapshot."""
+    body = request.get_json(force=True, silent=True) or {}
+    p = body.get("pipeline") or {}
+    wid = body.get("workflow_id")
+    if not p.get("nodes"):
+        return jsonify({"error": "Nothing to save — add at least one node."}), 400
+    state = workflow_state.load(wid)
+    if not state:
+        return jsonify({"error": "Nothing to save yet — run or execute some nodes first."}), 400
+    try:
+        order = pipeline.topo_order(p)
+    except Exception:  # noqa: BLE001
+        order = [n["id"] for n in p["nodes"]]
+    rec = pipeline_runs.build_record_from_state(
+        pipeline_runs.new_run_id(), p, state, order=order,
+        name=body.get("name"), pipeline_id=body.get("pipeline_id"))
+    pipeline_runs.save_run(rec)
+    return jsonify({"ok": True, "run_id": rec["run_id"], "name": rec["name"]})
+
+
+@app.route("/api/pipeline-runs/<run_id>", methods=["GET"])
+def api_pipeline_runs_get(run_id):
+    rec = pipeline_runs.load_run(run_id)
+    if not rec:
+        abort(404)
+    return jsonify(rec)
+
+
+@app.route("/api/pipeline-runs/<run_id>/delete", methods=["POST"])
+def api_pipeline_runs_delete(run_id):
+    return jsonify({"ok": pipeline_runs.delete_run(run_id)})
+
+
+@app.route("/api/pipeline/restore-state", methods=["POST"])
+def api_pipeline_restore_state():
+    """Restore a saved node-state map into a workflow (used when loading a saved state), so the
+    canvas shows the executed nodes and cache reuse keeps working. Body: {workflow_id, state}."""
+    body = request.get_json(force=True, silent=True) or {}
+    wid = body.get("workflow_id")
+    if not wid:
+        return jsonify({"error": "no workflow id"}), 400
+    workflow_state.save(wid, body.get("state") or {})
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

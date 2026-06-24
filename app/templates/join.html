@@ -135,6 +135,56 @@
     .gloading, .gerr { padding:10px 12px; font-size:.78rem; color:var(--muted); }
     .gerr { color:var(--bad); }
 
+    /* ---- live run status on the canvas (model-joining TODO #3a) ---- */
+    .gnode.run-running { border-color:var(--accent);
+      box-shadow:0 0 0 2px rgba(79,157,255,.32),0 6px 20px rgba(0,0,0,.35);
+      animation:noderun 1.2s ease-in-out infinite; }
+    @keyframes noderun {
+      0%,100% { box-shadow:0 0 0 2px rgba(79,157,255,.30),0 6px 20px rgba(0,0,0,.35); }
+      50%     { box-shadow:0 0 0 7px rgba(79,157,255,.10),0 6px 22px rgba(0,0,0,.40); } }
+    .gnode.run-done   { border-color:#2c5a3c; }
+    .gnode.run-failed { border-color:var(--bad);
+      box-shadow:0 0 0 2px rgba(255,107,107,.32),0 6px 20px rgba(0,0,0,.40); }
+    .gnode.run-blocked { opacity:.5; border-style:dashed; }
+    .gnode.run-skipped { opacity:.45; }
+    .gstat { flex:none; width:18px; height:18px; box-sizing:border-box; display:flex;
+      align-items:center; justify-content:center; font-size:.82rem; font-weight:700; border-radius:50%; }
+    .gstat.run-running { border:2.5px solid var(--border); border-top-color:var(--accent);
+      animation:spin .8s linear infinite; }
+    .gstat.run-done    { color:var(--good); }
+    .gstat.run-failed  { color:var(--bad); }
+    .gstat.run-blocked, .gstat.run-skipped { color:var(--muted); }
+    .gstat a { color:inherit; text-decoration:none; }
+    #wires path.wire.flow { stroke:var(--good); stroke-width:2.6; opacity:1;
+      stroke-dasharray:7 7; animation:flowdash .9s linear infinite; }
+    @keyframes flowdash { to { stroke-dashoffset:-28; } }
+    #wires path.wire.flowdone { stroke:var(--good); opacity:.85; }
+    #wires path.wire.blocked  { stroke:var(--bad); opacity:.32; stroke-dasharray:2 5; }
+    .pill.running { background:rgba(79,157,255,.16); color:var(--accent); }
+    .pill.blocked { background:rgba(255,107,107,.12); color:var(--bad); }
+    .pill.skipped { background:var(--panel2); color:var(--muted); }
+    .pill.cached  { background:rgba(45,212,191,.16); color:#2dd4bf; }
+
+    /* ---- per-node hover actions (Phase B) ---- */
+    .gact { border:none; background:transparent; color:var(--muted); cursor:pointer; flex:none;
+      font-size:.8rem; padding:2px 4px; border-radius:5px; opacity:0; transition:opacity .12s; }
+    .gnode:hover .gact, .gnode.run-running .gact { opacity:1; }
+    .gexec:hover:not(:disabled) { color:var(--good); background:rgba(76,208,122,.14); }
+    .greset:hover { color:var(--warn); background:rgba(255,200,87,.14); }
+    .gact:disabled { opacity:.25; cursor:not-allowed; }
+    .gnode:hover .gact:disabled { opacity:.3; }
+    /* reused-from-cache, shown live during a run */
+    .gnode.run-cached { border-color:#1f6f66; }
+    .gstat.run-cached { color:#2dd4bf; }
+    #wires path.wire.flowcached { stroke:#2dd4bf; opacity:.7; stroke-dasharray:5 6; }
+    /* ---- at-rest persistent state badges (from the plan dry-run) ---- */
+    .gnode.node-clean { border-color:#2c5a3c; }
+    .gnode.node-stale { border-color:var(--warn); box-shadow:0 0 0 1px rgba(255,200,87,.25),0 6px 20px rgba(0,0,0,.35); }
+    .gnode.node-blocked { border-color:var(--bad); }
+    .gstat.node-clean { color:var(--good); }
+    .gstat.node-stale { color:var(--warn); }
+    .gstat.node-blocked { color:var(--bad); }
+
     .edgepanel { margin-top:12px; padding:12px; border:1px solid var(--accent2); border-radius:10px;
       background:var(--panel); display:flex; align-items:flex-end; gap:10px; flex-wrap:wrap; }
     .edgepanel .col { display:flex; flex-direction:column; gap:3px; }
@@ -183,6 +233,17 @@
         </label>
       </div>
       <div id="saveMsg" class="hint"></div>
+      <div class="row-line" style="border-style:dashed">
+        <div class="col" style="min-width:300px">
+          <label>Saved states — node executions + model runs you saved</label>
+          <select id="runPick"><option value="">— none —</option></select>
+        </div>
+        <button class="btn secondary" type="button" onclick="loadPastRun()">Load</button>
+        <button class="xbtn" type="button" onclick="deletePastRun()">Delete</button>
+        <span style="flex:1"></span>
+        <button class="btn" type="button" onclick="savePastRun()" title="Save the current node executions + model runs as a named snapshot">💾 Save current state</button>
+        <span class="hint" id="runHistMsg"></span>
+      </div>
     </section>
 
     <!-- CANVAS -->
@@ -242,7 +303,9 @@
     <!-- ACTIONS -->
     <section>
       <button class="btn secondary" type="button" onclick="doValidate()">Validate</button>
-      <button class="btn" type="button" onclick="doRun()">▶ Run pipeline</button>
+      <button class="btn" type="button" onclick="doRun(false)" title="Runs only stale nodes; reuses valid caches">▶ Run pipeline</button>
+      <button class="btn secondary" type="button" onclick="doRun(true)" title="Ignore caches and re-run every node from scratch">↻ Force re-run all</button>
+      <span class="hint" style="margin-left:8px">Run executes only what changed. Hover a node to <b>▶ execute up to it</b> or <b>↺ reset</b> it.</span>
       <div id="validation" style="margin-top:12px"></div>
     </section>
 
@@ -279,12 +342,20 @@ let currentId = null, currentName = '';
 let selectedEdge = null;
 let zoom = 1, panX = 0, panY = 0;
 let stepOf = {};   // node id -> execution step (1-based), recomputed each render
+let runState = null;  // live pipeline run status: {map:{id->state}, failed, finished, results}
+let liveRun = false;  // true while a run/execute job is polling (gates plan refreshes)
+let canvasRunMode = false;  // true when the canvas should show runState (live run or history replay) instead of plan badges
+let nodePlan = {};    // nid -> 'reuse'|'run'|'blocked' (at-rest, from the plan dry-run)
+let nodeExec = {};    // nid -> {run_id, ok, fskx} (which nodes have a cached execution)
+let draftId = null;   // stable id for the unsaved scratch workflow (this browser)
+let nodeStateTimer = null;
 
 // ---- working-draft persistence (this browser) ----
 function saveState(){
   try { localStorage.setItem('fskx_join',
         JSON.stringify({nodes, edges, shared, seq, currentId, currentName,
                         view:{zoom, panX, panY}})); } catch(e){}
+  scheduleNodeStateRefresh();  // config/wiring may have changed → refresh stale/clean badges
 }
 function loadState(){
   try {
@@ -297,7 +368,8 @@ function loadState(){
 function clearAll(){
   if(!confirm('Start a new (empty) join? Your saved pipelines are not affected.')) return;
   nodes=[]; edges=[]; shared=[]; seq=0; currentId=null; currentName=''; selectedEdge=null;
-  zoom=1; panX=0; panY=0;
+  zoom=1; panX=0; panY=0; runState=null; canvasRunMode=false; nodePlan={}; nodeExec={};
+  document.getElementById('runSection').style.display='none';
   localStorage.removeItem('fskx_join');
   document.getElementById('pipeName').value='';
   renderAll();
@@ -339,7 +411,8 @@ function loadPipeline(){
 }
 function loadRecord(rec){
   const p = rec.pipeline||{};
-  currentId=rec.id; currentName=rec.name; selectedEdge=null;
+  currentId=rec.id; currentName=rec.name; selectedEdge=null; runState=null; canvasRunMode=false;
+  document.getElementById('runSection').style.display='none';
   document.getElementById('pipeName').value=rec.name||'';
   nodes=[]; edges=[]; shared=[]; let maxSeq=0;
   (p.nodes||[]).forEach(n=>{
@@ -535,15 +608,20 @@ function renderCanvas(){
     box.innerHTML = `<div class="ghead"><span class="gstep" title="execution step">${stepOf[n.id]||'?'}</span>
       <span class="gname" title="${(n.name||n.label||'').replace(/"/g,'&quot;')}">${n.name||n.label}</span>${lang}
       <span class="gspring"></span>
+      <span class="gstat"></span>
+      <button class="gact gexec" title="Execute up to here (run this node + any stale upstream)">▶</button>
+      <button class="gact greset" title="Reset this node and everything downstream">↺</button>
       <button class="gx" title="remove">✕</button></div>${body}`;
     layer.appendChild(box);
 
     const head = box.querySelector('.ghead');
     head.addEventListener('pointerdown', ev=>{
-      if(ev.target.closest('.gx')) return;
+      if(ev.target.closest('.gx') || ev.target.closest('.gact')) return;
       beginNodeDrag(ev, box, n);
     });
     box.querySelector('.gx').addEventListener('click', ()=>removeNode(n.id));
+    box.querySelector('.gexec').addEventListener('click', ev=>{ ev.stopPropagation(); executeNode(n.id); });
+    box.querySelector('.greset').addEventListener('click', ev=>{ ev.stopPropagation(); resetNode(n.id); });
     box.querySelectorAll('.gport .gdot').forEach(dot=>{
       const port = dot.closest('.gport');
       const [nid, pid, dir] = port.dataset.port.split('|');
@@ -551,7 +629,7 @@ function renderCanvas(){
     });
   });
   applyTransform();
-  drawWires();
+  paintNodes();
 }
 function list_len(n,col){ if(!n.params) return 0;
   return n.params.filter(p=> col==='in' ? isInput(p) : !isInput(p)).length; }
@@ -623,6 +701,13 @@ function drawWires(){
     const w = document.createElementNS('http://www.w3.org/2000/svg','path');
     w.setAttribute('d', d); w.setAttribute('class','wire'+(i===selectedEdge?' sel':''));
     w.setAttribute('marker-end','url(#arrow)');
+    w.dataset.ei = i;
+    if(canvasRunMode && runState){
+      const ss = runState.map[e.src_node], ts = runState.map[e.tgt_node];
+      if(ts==='blocked' || ts==='skipped') w.classList.add('blocked');
+      else if(ss==='cached') w.classList.add('flowcached');
+      else if(ss==='done') w.classList.add(runState.finished ? 'flowdone' : 'flow');
+    }
     svg.appendChild(hit); svg.appendChild(w);
     // dotted echo over any node box that hides this wire
     if(top) ghostSegments(a, b, rects).forEach(seg=>{
@@ -869,16 +954,25 @@ function edgeField(i,k,v){
   }
   edges[i][k]=v; renderAll();
 }
-function edgeRaw(i,k,v){ edges[i][k]=v; drawWires(); saveState(); }
+function edgeRaw(i,k,v){
+  edges[i][k]=v;
+  // Keep the two views (canvas edge panel <-> connections table) in sync without a full
+  // re-render, so the input currently being typed in keeps its focus/cursor. Push the new
+  // value into any *sibling* input bound to the same edge field.
+  document.querySelectorAll('[data-ei="'+i+'"][data-ek="'+k+'"]').forEach(function(el){
+    if(el!==document.activeElement && el.value!==v) el.value=v;
+  });
+  drawWires(); saveState();
+}
 function renderEdges(){
   const box = document.getElementById('edges'); box.innerHTML='';
   edges.forEach((e,i)=>{
     const tf = e.tf||'none';
     const extra = tf==='affine'
-        ? `<div class="tf-extra"><input style="width:78px" placeholder="scale" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)">
-           <input style="width:78px" placeholder="offset" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
+        ? `<div class="tf-extra"><input data-ei="${i}" data-ek="scale" style="width:78px" placeholder="scale" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)">
+           <input data-ei="${i}" data-ek="offset" style="width:78px" placeholder="offset" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
       : tf==='expression'
-        ? `<input style="width:160px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)">` : '';
+        ? `<input data-ei="${i}" data-ek="expr" style="width:160px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)">` : '';
     const row = document.createElement('div'); row.className='row-line';
     if(i===selectedEdge) row.style.borderColor='var(--accent2)';
     row.innerHTML = `
@@ -932,10 +1026,10 @@ function renderEdgePanel(){
   if(selectedEdge==null || selectedEdge>=edges.length){ box.innerHTML=''; return; }
   const e = edges[selectedEdge], i = selectedEdge, tf = e.tf||'none';
   const extra = tf==='affine'
-      ? `<div class="col"><label>scale</label><input style="width:80px" placeholder="1" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)"></div>
-         <div class="col"><label>offset</label><input style="width:80px" placeholder="0" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
+      ? `<div class="col"><label>scale</label><input data-ei="${i}" data-ek="scale" style="width:80px" placeholder="1" value="${e.scale}" oninput="edgeRaw(${i},'scale',this.value)"></div>
+         <div class="col"><label>offset</label><input data-ei="${i}" data-ek="offset" style="width:80px" placeholder="0" value="${e.offset}" oninput="edgeRaw(${i},'offset',this.value)"></div>`
     : tf==='expression'
-      ? `<div class="col"><label>expression</label><input style="width:170px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)"></div>` : '';
+      ? `<div class="col"><label>expression</label><input data-ei="${i}" data-ek="expr" style="width:170px" placeholder="{value} * 3600" value="${e.expr}" oninput="edgeRaw(${i},'expr',this.value)"></div>` : '';
   box.innerHTML = `<div class="edgepanel">
     <div class="col"><label>Selected connection</label>
       <span class="wire-label">${stepLabel(e.src_node)}.${e.src_param} → ${stepLabel(e.tgt_node)}.${e.tgt_param}</span></div>
@@ -999,42 +1093,270 @@ function doValidate(){
     body:JSON.stringify(buildPipeline())}).then(r=>r.json())
     .then(d=>{d.checked=true; showMessages(d);});
 }
-function doRun(){
+function doRun(force){
+  const nm = (document.getElementById('pipeName').value||'').trim() || currentName || '';
   fetch('/api/pipeline/run',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(buildPipeline())}).then(r=>r.json()).then(d=>{
+    body:JSON.stringify({pipeline: buildPipeline(), name: nm, pipeline_id: currentId,
+                         workflow_id: currentWorkflowId(), force: !!force})}).then(r=>r.json()).then(d=>{
       if(d.error){ showMessages({errors:[d.error]}); return; }
       document.getElementById('runSection').style.display='block';
       document.getElementById('runSection').scrollIntoView({behavior:'smooth'});
+      liveRun = true; canvasRunMode = true;
+      runState = {map:Object.fromEntries(nodes.map(n=>[n.id,'pending'])),
+                  failed:null, finished:false, results:{}};
+      applyRunState();
       pollStatus(d.job_id);
     });
 }
+// ---- live run status on the canvas (TODO #3a) ----
+// translate an on_node phase ('start'/'done'/'failed') into a display state
+function phaseState(p){ return p==='start' ? 'running' : (p || 'pending'); }
+// node ids reachable downstream from any of startIds by following edges (source->target)
+function downstreamOf(startIds){
+  const adj = {};
+  edges.forEach(e=>{ (adj[e.src_node] = adj[e.src_node] || []).push(e.tgt_node); });
+  const seen = new Set(), stack = [...startIds];
+  while(stack.length){
+    const x = stack.pop();
+    (adj[x]||[]).forEach(y=>{ if(!seen.has(y)){ seen.add(y); stack.push(y); } });
+  }
+  return seen;
+}
+// build the {id->state} map from a status payload, marking downstream-of-failure honestly
+function computeRunStates(d){
+  const ns = d.nodes || {};
+  const ids = ((d.order && d.order.length) ? d.order.slice() : nodes.map(n=>n.id));
+  nodes.forEach(n=>{ if(!ids.includes(n.id)) ids.push(n.id); });
+  const map = {};
+  ids.forEach(id=>{ map[id] = phaseState((ns[id]||{}).phase); });
+  const failed = d.failed_node || ids.find(id=>map[id]==='failed') || null;
+  const finished = !!d.state && d.state!=='running';
+  if(failed){
+    const down = downstreamOf([failed]);
+    ids.forEach(id=>{
+      if(id===failed || ['done','cached','running','failed'].includes(map[id])) return;
+      map[id] = down.has(id) ? 'blocked' : (finished ? 'skipped' : 'pending');
+    });
+  }
+  return {map, failed, finished, results:(d.results||{})};
+}
+// paint the run state onto the canvas node boxes + their status glyph, then redraw wires
+const NODE_STATE_CLASSES = ['run-running','run-done','run-failed','run-blocked','run-skipped',
+  'run-cached','node-clean','node-stale','node-blocked'];
+function applyRunState(){
+  document.querySelectorAll('#canvasNodes .gnode').forEach(box=>{
+    const id = box.dataset.node;
+    box.classList.remove(...NODE_STATE_CLASSES);
+    const stat = box.querySelector('.gstat');
+    if(stat){ stat.className='gstat'; stat.innerHTML=''; }
+    if(!runState) return;
+    const s = runState.map[id] || 'pending';
+    if(s!=='pending') box.classList.add('run-'+s);
+    if(stat && s!=='pending'){
+      stat.classList.add('run-'+s);
+      const r = runState.results[id];
+      const glyph = s==='done' ? '✓' : s==='cached' ? '♻' : s==='failed' ? '✕'
+                  : (s==='blocked'||s==='skipped') ? '⊘' : '';
+      if((s==='done'||s==='cached'||s==='failed') && r && r.run_id){
+        const tip = s==='failed' ? 'view run log' : s==='cached' ? 'reused from cache — view results' : 'view results';
+        stat.innerHTML = `<a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}" title="${tip}">${glyph}</a>`;
+      } else {
+        stat.textContent = glyph;
+      }
+    }
+  });
+  drawWires();
+}
+
+// ---- per-node execution state (Phase B: caching + execute-up-to-here) ----
+function currentWorkflowId(){
+  if(currentId) return currentId;            // a saved pipeline → keyed by its id
+  if(!draftId){                              // unsaved scratch draft → stable per-browser id
+    draftId = localStorage.getItem('fskx_join_draftid');
+    if(!draftId){ draftId = 'draft_' + Math.random().toString(36).slice(2,10);
+      try{ localStorage.setItem('fskx_join_draftid', draftId); }catch(e){} }
+  }
+  return draftId;
+}
+// at-rest badges from the plan dry-run: clean (reuse) / stale (will run but has a prior run) /
+// new (will run, never run) / blocked. Skipped while a live run owns the canvas.
+function applyNodePlan(){
+  document.querySelectorAll('#canvasNodes .gnode').forEach(box=>{
+    const id = box.dataset.node;
+    box.classList.remove(...NODE_STATE_CLASSES);
+    const stat = box.querySelector('.gstat');
+    if(stat){ stat.className='gstat'; stat.innerHTML=''; }
+    const pl = nodePlan[id];
+    const clean = pl==='reuse';
+    // Execute is disabled on an up-to-date node — reset it (↺) to re-run.
+    const exbtn = box.querySelector('.gexec');
+    if(exbtn){ exbtn.disabled = clean;
+      exbtn.title = clean ? 'Up to date — press ↺ Reset to re-run'
+                          : 'Execute up to here (run this node + any stale upstream)'; }
+    if(!pl) return;
+    const ex = nodeExec[id];
+    let cls, glyph, tip;
+    if(clean){ cls='node-clean'; glyph='✓'; tip='executed — up to date'; }
+    else if(pl==='blocked'){ cls='node-blocked'; glyph='⊘'; tip='cannot load model'; }
+    else if(ex){ cls='node-stale'; glyph='●'; tip='stale — will re-run on execute'; }
+    else { return; }  // never executed: leave neutral
+    box.classList.add(cls);
+    if(stat){
+      stat.classList.add(cls);
+      if(cls==='node-clean' && ex && ex.run_id){
+        stat.innerHTML = `<a href="/runs/${encodeURIComponent(ex.fskx)}/${ex.run_id}" title="${tip}">${glyph}</a>`;
+      } else { stat.textContent = glyph; stat.title = tip; }
+    }
+  });
+  drawWires();
+}
+function paintNodes(){ if(canvasRunMode && runState) applyRunState(); else applyNodePlan(); }
+function refreshNodeState(){
+  if(!nodes.length){ nodePlan={}; nodeExec={}; if(!canvasRunMode) applyNodePlan(); return; }
+  fetch('/api/pipeline/plan',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), workflow_id: currentWorkflowId()})})
+    .then(r=>r.json()).then(d=>{
+      nodePlan = d.plan||{}; nodeExec = d.state||{};
+      if(!canvasRunMode) applyNodePlan();
+    }).catch(()=>{});
+}
+function scheduleNodeStateRefresh(){
+  if(liveRun) return;
+  clearTimeout(nodeStateTimer);
+  nodeStateTimer = setTimeout(refreshNodeState, 500);
+}
+function executeNode(nid){
+  const name = (document.getElementById('pipeName').value||'').trim() || currentName || '';
+  fetch('/api/pipeline/execute-node',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), targets:[nid], workflow_id: currentWorkflowId(),
+                         name, pipeline_id: currentId})}).then(r=>r.json()).then(d=>{
+      if(d.error){ showMessages({errors:[d.error]}); return; }
+      document.getElementById('runSection').style.display='block';
+      document.getElementById('runSection').scrollIntoView({behavior:'smooth'});
+      liveRun = true; canvasRunMode = true;
+      runState = {map:Object.fromEntries(nodes.map(n=>[n.id,'pending'])), failed:null, finished:false, results:{}};
+      applyRunState();
+      pollStatus(d.job_id);
+    });
+}
+function resetNode(nid){
+  canvasRunMode = false;  // return the canvas to at-rest badges so the reset is reflected
+  fetch('/api/pipeline/reset-node',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), node:nid, workflow_id: currentWorkflowId()})})
+    .then(r=>r.json()).then(d=>{ if(!d.error) refreshNodeState(); else showMessages({errors:[d.error]}); });
+}
+
+// shared renderers (used by both a live run and a replayed run from history)
+function renderRunList(order, rs){
+  order = (order && order.length) ? order : nodes.map(n=>n.id);
+  document.getElementById('nodeStates').innerHTML = order.map((id,idx)=>{
+    const st = rs.map[id] || 'pending';
+    const node = nodes.find(n=>n.id===id) || {label:id};
+    const r = rs.results[id];
+    const linkLabel = st==='failed' ? 'view log' : 'view results';
+    const link = (r && r.run_id) ? ` · <a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}">${linkLabel}</a>` : '';
+    return `<div class="nodestat"><span class="node-id">step ${idx+1}</span>
+      <span class="pill ${st}">${st}</span> ${node.name||node.label}${link}</div>`;
+  }).join('');
+}
+function renderProvenance(prov){
+  const el = document.getElementById('provenance');
+  if(!(prov && prov.length)){ el.innerHTML=''; return; }
+  el.innerHTML =
+    '<h2>Data flow (provenance)</h2><table class="ptable"><tr><th>From</th><th>To</th><th>Transform</th><th>Source run</th><th>Value hash</th></tr>'+
+    prov.map(pv=>{
+      const t = pv.transform ? JSON.stringify(pv.transform) : '—';
+      return `<tr><td>${pv.source.node}.${pv.source.param}</td><td>${pv.target.node}.${pv.target.param}</td>
+        <td>${t}</td><td>${pv.source_run||''}</td><td><code>${pv.value_hash||''}</code></td></tr>`;
+    }).join('')+'</table>';
+}
+
 function pollStatus(job){
   fetch('/api/pipeline/status/'+job).then(r=>r.json()).then(d=>{
     const running = d.state==='running';
     document.getElementById('runMsg').innerHTML =
       (running?'<span class="spinner"></span> ':(d.ok?'✓ ':'✕ ')) + (d.message||'');
-    const ns = d.nodes||{}, res = d.results||{};
-    const order = d.order && d.order.length ? d.order : nodes.map(n=>n.id);
-    document.getElementById('nodeStates').innerHTML = order.map((id,idx)=>{
-      const st = (ns[id]||{}).phase || 'pending';
-      const node = nodes.find(n=>n.id===id) || {label:id};
-      const r = res[id];
-      let link = (r && r.run_id) ? ` · <a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}">view results</a>` : '';
-      return `<div class="nodestat"><span class="node-id">step ${idx+1}</span>
-        <span class="pill ${st}">${st}</span> ${node.name||node.label}${link}</div>`;
-    }).join('');
-    if(d.provenance && d.provenance.length){
-      document.getElementById('provenance').innerHTML =
-        '<h2>Data flow (provenance)</h2><table class="ptable"><tr><th>From</th><th>To</th><th>Transform</th><th>Source run</th><th>Value hash</th></tr>'+
-        d.provenance.map(pv=>{
-          const t = pv.transform ? JSON.stringify(pv.transform) : '—';
-          return `<tr><td>${pv.source.node}.${pv.source.param}</td><td>${pv.target.node}.${pv.target.param}</td>
-            <td>${t}</td><td>${pv.source_run||''}</td><td><code>${pv.value_hash||''}</code></td></tr>`;
-        }).join('')+'</table>';
+    runState = computeRunStates(d);
+    applyRunState();
+    renderRunList(d.order, runState);
+    renderProvenance(d.provenance);
+    if(running){ setTimeout(()=>pollStatus(job), 1200); }
+    else {
+      liveRun = false; canvasRunMode = false;  // hand the canvas back to the at-rest plan badges
+      refreshRuns();          // a finished run just produced a new history record
+      refreshNodeState();     // executed nodes now show as clean/cached, stale ones updated
     }
-    if(running) setTimeout(()=>pollStatus(job), 1200);
   });
 }
+
+// ---- saved states (manual snapshots of node executions + model runs) ----
+function refreshRuns(sel){
+  fetch('/api/pipeline-runs').then(r=>r.json()).then(list=>{
+    const s = document.getElementById('runPick');
+    if(!s) return;
+    s.innerHTML = '<option value="">— none —</option>' + list.map(rec=>{
+      const when = (rec.created||rec.run_id||'').replace('T',' ');
+      const mark = rec.ok ? '✓' : '✕';
+      return `<option value="${rec.run_id}" ${rec.run_id===sel?'selected':''}>${mark} ${rec.name} · ${when} · ${rec.n_nodes} nodes</option>`;
+    }).join('');
+  });
+}
+function savePastRun(){
+  const name = (document.getElementById('pipeName').value||'').trim() || currentName || 'Saved state';
+  fetch('/api/pipeline-runs/save',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({pipeline: buildPipeline(), workflow_id: currentWorkflowId(),
+                         name, pipeline_id: currentId})}).then(r=>r.json()).then(d=>{
+      if(d.error){ runHistFlash('✕ '+d.error); return; }
+      refreshRuns(d.run_id); runHistFlash('💾 Saved state “'+d.name+'”.');
+    });
+}
+function loadPastRun(){
+  const id = document.getElementById('runPick').value;
+  if(!id) return;
+  fetch('/api/pipeline-runs/'+encodeURIComponent(id)).then(r=>r.json()).then(loadRunRecord);
+}
+function loadRunRecord(rec){
+  if(!rec || rec.error){ runHistFlash('✕ could not load'); return; }
+  // 1) restore the wiring snapshot onto the canvas (re-fetches ports async)
+  loadRecord({id: rec.pipeline_id||null, name: rec.name, pipeline: rec.pipeline});
+  // 2a) a SAVED STATE (has node_state): restore the working node-state so the canvas shows the
+  //     executed nodes and caching/reset keep functioning. Then show at-rest plan badges.
+  if(rec.node_state){
+    canvasRunMode = false;
+    fetch('/api/pipeline/restore-state',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({workflow_id: currentWorkflowId(), state: rec.node_state})})
+      .then(()=>refreshNodeState());
+    runHistFlash('Restored saved state from '+((rec.created||'').replace('T',' ')));
+    return;
+  }
+  // 2b) a legacy auto-saved run record (no node_state): visual replay (Phase A behaviour)
+  const phaseNodes = {}, results = {};
+  Object.entries(rec.nodes||{}).forEach(([nid,info])=>{
+    phaseNodes[nid] = {phase: info.phase || (info.ok?'done':'failed')};
+    results[nid] = {ok:info.ok, run_id:info.run_id, fskx:info.fskx};
+  });
+  runState = computeRunStates({state: rec.ok?'done':'error', failed_node: rec.failed_node,
+                               order: rec.order, nodes: phaseNodes, results});
+  canvasRunMode = true;
+  applyRunState();
+  document.getElementById('runSection').style.display='block';
+  document.getElementById('runMsg').innerHTML =
+    (rec.ok?'✓ ':'✕ ') + (rec.ok?'Pipeline finished.':'Pipeline failed.') +
+    ` <span class="hint">— replayed from history (${(rec.created||'').replace('T',' ')})</span>`;
+  renderRunList(rec.order, runState);
+  renderProvenance(rec.provenance);
+  runHistFlash('Replaying run from '+((rec.created||'').replace('T',' ')));
+}
+function deletePastRun(){
+  const id = document.getElementById('runPick').value;
+  if(!id) return;
+  if(!confirm('Delete this saved state? (The individual model results are not affected.)')) return;
+  fetch('/api/pipeline-runs/'+encodeURIComponent(id)+'/delete',{method:'POST'}).then(r=>r.json()).then(()=>{
+    refreshRuns(); runHistFlash('Deleted saved state.');
+  });
+}
+function runHistFlash(msg){ const m=document.getElementById('runHistMsg'); if(m){ m.textContent=msg;
+  setTimeout(()=>{ if(m.textContent===msg) m.textContent=''; }, 4000); } }
 
 loadState();
 nodes.forEach(ensurePos);
@@ -1042,6 +1364,8 @@ if(currentName) document.getElementById('pipeName').value = currentName;
 renderAll();
 applyTransform();
 refreshSaved();
+refreshRuns();
+refreshNodeState();
 // model ports may not be cached in this draft — re-fetch any node missing params
 nodes.forEach(node=>{
   if(node.params) return;
