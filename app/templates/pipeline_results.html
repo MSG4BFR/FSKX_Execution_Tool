@@ -30,6 +30,12 @@
     .pr-jtable th, .pr-jtable td { border:1px solid var(--border); padding:5px 9px; text-align:left; vertical-align:top; }
     .pr-jtable th { color:var(--muted); font-weight:600; font-size:12px; }
     .pr-tf { color:var(--muted); font-size:12px; }
+    body.pr-hide-inputs .pr-inj, body.pr-hide-inputs .pr-cfg { display:none; }
+    .pr-view-btn.active { color:var(--text); border-color:var(--accent); background:var(--panel2); }
+    #prGalleryView { display:none; grid-template-columns:repeat(auto-fill, minmax(320px,1fr)); gap:18px; margin-top:8px; }
+    .pr-gallery-item { margin:0; border:1px solid var(--border); border-radius:10px; padding:10px; }
+    .pr-gallery-label { font-size:12.5px; color:var(--muted); margin-bottom:6px; }
+    .pr-gallery-label a { color:inherit; }
   </style>
 </head>
 <body>
@@ -47,11 +53,16 @@
         <a class="pr-chip" href="#node-{{ loop.index }}">{{ loop.index }} · {{ it.name }}</a>
       {% endfor %}
       <span class="pr-tools">
+        <button class="btn secondary" type="button" id="prInputsBtn" onclick="prToggleInputs()">Hide inputs</button>
+        <button class="btn secondary pr-view-btn active" type="button" id="prViewStepsBtn" onclick="prShowView('steps')">Steps view</button>
+        <button class="btn secondary pr-view-btn" type="button" id="prViewGalleryBtn" onclick="prShowView('gallery')">All plots</button>
         <button class="btn secondary" type="button" onclick="prAll(true)">Expand all</button>
         <button class="btn secondary" type="button" onclick="prAll(false)">Collapse all</button>
       </span>
     </div>
 
+    {% set ns = namespace(any_plots=false) %}
+    <div id="prStepsView">
     {% for it in items %}
       {% set run = it.run %}
       {% set fskx = it.fskx %}
@@ -108,6 +119,7 @@
           </fieldset>
 
           {% if run.plots %}
+            {% set ns.any_plots = true %}
             {% if run.plots|length > 1 %}<p class="note">{{ run.plots|length }} plots:</p>{% endif %}
             {% for p in run.plots %}
               {% set url = '/runs/' + fskx + '/' + run.run_id + '/file/' + p %}
@@ -139,6 +151,31 @@
         </div>
       </details>
     {% endfor %}
+    </div>
+
+    <div id="prGalleryView">
+      {% if not ns.any_plots %}
+        <p class="note">No plots were produced by any of the selected nodes.</p>
+      {% else %}
+        {% for it in items %}
+          {% set step_num = loop.index %}
+          {% set run = it.run %}
+          {% set fskx = it.fskx %}
+          {% for p in run.plots %}
+            {% set url = '/runs/' + fskx + '/' + run.run_id + '/file/' + p %}
+            <figure class="plot-wrap pr-gallery-item">
+              <figcaption class="pr-gallery-label"><a href="#node-{{ step_num }}">step {{ step_num }} · {{ it.name }}</a></figcaption>
+              {% if p.lower().endswith('.pdf') %}
+                <embed type="application/pdf" class="plot plot-pdf" src="{{ url }}">
+              {% else %}
+                <img class="plot" src="{{ url }}" alt="{{ p }}">
+              {% endif %}
+              <figcaption class="note"><a href="{{ url }}" download>{{ p }} ↓</a></figcaption>
+            </figure>
+          {% endfor %}
+        {% endfor %}
+      {% endif %}
+    </div>
 
     {% set fskx = '' %}
     {% set chat_title = 'Talk to these results' %}
@@ -148,6 +185,21 @@
   </div>
   <script>
     function prAll(open){ document.querySelectorAll('details.pr-node').forEach(d=>{ d.open = open; }); }
+    function prToggleInputs(){
+      const hidden = document.body.classList.toggle('pr-hide-inputs');
+      document.getElementById('prInputsBtn').textContent = hidden ? 'Show inputs' : 'Hide inputs';
+    }
+    function prShowView(view){
+      const steps = document.getElementById('prStepsView');
+      const gallery = document.getElementById('prGalleryView');
+      const stepsBtn = document.getElementById('prViewStepsBtn');
+      const galleryBtn = document.getElementById('prViewGalleryBtn');
+      const isGallery = view === 'gallery';
+      steps.style.display = isGallery ? 'none' : '';
+      gallery.style.display = isGallery ? 'grid' : 'none';
+      stepsBtn.classList.toggle('active', !isGallery);
+      galleryBtn.classList.toggle('active', isGallery);
+    }
     {% if items %}
     window.fskxChatEndpoint = "/api/pipeline-chat";
     const PIPELINE_CHAT = {
