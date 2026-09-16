@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 
@@ -47,15 +48,40 @@ def list_models():
     return out
 
 
-def extract_model(fskx_name):
-    """Extract an archive into a fresh work dir; return that dir."""
+# Extraction targets a single dir per model (WORK_DIR/<base>). The Flask server handles
+# requests on multiple threads, so two requests for the *same* model — e.g. the join page
+# loading ports for two nodes of one model at once — would otherwise race in extract_model
+# (one rmtree's the dir the other is writing → "[Errno 17] File exists"). A per-base lock
+# serialises extraction; read-only callers additionally reuse an existing extraction.
+_EXTRACT_LOCKS = {}
+_EXTRACT_LOCKS_GUARD = threading.Lock()
+
+
+def _extract_lock(base):
+    with _EXTRACT_LOCKS_GUARD:
+        lk = _EXTRACT_LOCKS.get(base)
+        if lk is None:
+            lk = _EXTRACT_LOCKS[base] = threading.Lock()
+        return lk
+
+
+def extract_model(fskx_name, reuse=False):
+    """Extract an archive into its work dir and return that dir. Serialised per model so
+    concurrent requests for the same model can't collide. With ``reuse=True`` an existing,
+    non-empty extraction is returned as-is (no rmtree/re-extract) — safe for read-only callers
+    (port menus, model info) and the fix for concurrent same-model loads; the run path keeps
+    the default fresh extraction."""
     src = os.path.join(MODELS_DIR, fskx_name)
-    dest = os.path.join(WORK_DIR, os.path.splitext(fskx_name)[0])
-    if os.path.isdir(dest):
-        shutil.rmtree(dest)
-    os.makedirs(dest, exist_ok=True)
-    with zipfile.ZipFile(src, "r") as zf:
-        zf.extractall(dest)
+    base = os.path.splitext(fskx_name)[0]
+    dest = os.path.join(WORK_DIR, base)
+    with _extract_lock(base):
+        if reuse and os.path.isdir(dest) and os.listdir(dest):
+            return dest
+        if os.path.isdir(dest):
+            shutil.rmtree(dest)
+        os.makedirs(dest, exist_ok=True)
+        with zipfile.ZipFile(src, "r") as zf:
+            zf.extractall(dest)
     return dest
 
 
@@ -288,7 +314,7 @@ def serializable_param_specs(metadata):
 def model_param_specs(fskx_name):
     """All declared parameters of a model (id, dataType, classification, name, unit) — used
     by the join builder to populate source/target port menus. Extraction is reused/cached."""
-    model_dir = extract_model(fskx_name)
+    model_dir = extract_model(fskx_name, reuse=True)
     return serializable_param_specs(load_metadata(model_dir))
 
 
@@ -714,6 +740,14 @@ def chat_about_model(fskx_name, messages, cfg, run_ids=None):
                                   run_ids=run_ids)
 
 
+def chat_about_pipeline(items, messages, cfg, wiring=None):
+    """Answer a conversation about a SELECTION of pipeline node runs (possibly different
+    models). `items` is a list of {fskx, run_id, step, name}; `wiring` is a compact list of
+    step-to-step joins. Delegates to aienv, which builds a tight, PDF-free, clipped context."""
+    import aienv
+    return aienv.chat_about_pipeline(items, messages, cfg, wiring=wiring)
+
+
 def ai_build_image(fskx_name, dockerfile_text, progress=None):
     """Build (and thereby register) the per-model AI image. Returns (ok, tag, log_path)."""
     import aienv
@@ -878,7 +912,7 @@ def model_info(fskx_name):
     Best-effort: a non-conformant archive yields an `error` message (and empty
     scenarios/fields) rather than raising, so the page can show it and disable Run.
     """
-    model_dir = extract_model(fskx_name)
+    model_dir = extract_model(fskx_name, reuse=True)
     spec = depresolve.resolve(model_dir)
     language = spec["language"]
     metadata = load_metadata(model_dir)

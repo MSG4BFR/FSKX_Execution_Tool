@@ -2,9 +2,9 @@
      Requires: `fskx`, `api_key_set`.
      Optional: `chat_scope` (label text), `chat_run_ids` (list -> scopes results). -->
 <div class="card chatbox" style="margin-top:22px">
-  <strong>Talk to this model</strong>
-  <div class="note">Ask {{ ai_label }} about this model — its metadata, paper, scripts and
-  documentation — and about {{ chat_scope if chat_scope is defined else 'its stored simulation results (all runs)' }}.
+  <strong>{{ chat_title if chat_title is defined else 'Talk to this model' }}</strong>
+  <div class="note">{% if chat_intro is defined %}{{ chat_intro }}{% else %}Ask {{ ai_label }} about this model — its metadata, paper, scripts and
+  documentation — and about {{ chat_scope if chat_scope is defined else 'its stored simulation results (all runs)' }}.{% endif %}
   Follow-up questions keep their context.</div>
 
   {% if not api_key_set %}
@@ -161,10 +161,20 @@
     input.disabled = sendBtn.disabled = true;
     thinking.style.display = "block";
     try {
-      const body = { fskx, messages: history };
-      const ids = resolveRunIds();
-      if (ids && ids.length) body.run_ids = ids;
-      const resp = await fetch("/api/chat", {
+      // A host page can override the destination + payload (e.g. the pipeline-results page
+      // posts a multi-node selection to /api/pipeline-chat). Read at send-time so the hooks
+      // can be set in any order relative to this component.
+      let body;
+      if (typeof window.fskxChatBody === "function") {
+        body = window.fskxChatBody(history);
+      } else {
+        body = { fskx, messages: history };
+        const ids = resolveRunIds();
+        if (ids && ids.length) body.run_ids = ids;
+      }
+      const endpoint = (typeof window.fskxChatEndpoint === "string" && window.fskxChatEndpoint)
+        ? window.fskxChatEndpoint : "/api/chat";
+      const resp = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

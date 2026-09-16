@@ -728,3 +728,93 @@ def chat_about_model(model_dir, fskx_name, messages, cfg, run_ids=None,
                 break
 
     return complete(cfg, system, api_messages, max_tokens)
+
+
+PIPELINE_CHAT_SYSTEM_PROMPT = """\
+You are a scientific assistant helping a researcher interpret a CHAIN of predictive models (a
+pipeline) and the results of selected nodes. Answer using ONLY the PIPELINE CONTEXT below.
+
+Important: the results below are COMPACT, CLIPPED SAMPLES (truncated JSON, the heads of CSV
+tables) and short per-node summaries — NOT the full datasets. If a precise number or row is not
+present in the sample, say so plainly and tell the user to open that node's results page, rather
+than guessing or extrapolating beyond what is shown. Refer to nodes by their step number and
+model name, use each model's own parameter names and units, and explain how values flow between
+steps when it is relevant.
+
+PIPELINE CONTEXT
+================
+{pipeline_context}
+"""
+
+
+def _pipeline_node_digest(fskx_name, run_id, per_node_limit):
+    """A compact, bounded digest of ONE node run: model summary, config, joined inputs, and
+    small clipped samples of results.json / CSV outputs. No paper, no full files."""
+    import engine
+    r = next((x for x in engine.list_runs(fskx_name) if x["run_id"] == run_id), None)
+    if not r:
+        return "(this run could not be found among the stored results)"
+    lines = []
+    try:
+        info = engine.model_info(fskx_name)
+        lines.append(f"model: {info.get('name', fskx_name)} (language={info.get('language', '?')})")
+        desc = (info.get("description") or "").strip()
+        if desc:
+            lines.append("description: " + desc[:240])
+    except Exception:  # noqa: BLE001
+        pass
+    lines.append(f"run {run_id} (ok={r.get('ok')}, scenario={r.get('scenario')})")
+    if r.get("params"):
+        lines.append("parameters used: " + json.dumps(r["params"]))
+    if r.get("injected"):
+        lines.append("joined inputs (from upstream nodes): " + json.dumps(r["injected"]))
+    if r.get("warnings"):
+        lines.append(f"visualization warnings: {len(r['warnings'])}")
+    rj = engine.run_file_path(fskx_name, run_id, "results.json")
+    if rj:
+        lines.append("results.json (clipped):\n" + _read_clip(rj, per_node_limit))
+    for f in r.get("files", []):
+        if f.lower().endswith((".csv", ".tsv")):
+            p = engine.run_file_path(fskx_name, run_id, f)
+            if p:
+                lines.append(f"{f} (sample):\n" + _csv_sample(p))
+    return "\n".join(lines)
+
+
+def chat_about_pipeline(items, messages, cfg, wiring=None, max_tokens=1500,
+                        per_node_limit=1800, total_limit=16000):
+    """Answer a conversation about a SELECTION of pipeline node runs (possibly different
+    models). Builds a deliberately tight context: a wiring overview plus one compact digest per
+    node (config + joined inputs + clipped result samples), capped by `per_node_limit` and an
+    overall `total_limit`, and with NO paper PDFs — so full datasets are never sent to the LLM."""
+    blocks = []
+    if wiring:
+        wl = ["Data flow between selected nodes:"]
+        for w in wiring:
+            tf = "  [" + json.dumps(w["transform"]) + "]" if w.get("transform") else ""
+            wl.append(f"  step {w.get('from_step')}·{w.get('from_param')} -> "
+                      f"step {w.get('to_step')}·{w.get('to_param')}{tf}")
+        blocks.append("\n".join(wl))
+    total = 0
+    for idx, it in enumerate(items, 1):
+        if total >= total_limit:
+            blocks.append("…(further nodes omitted to stay within size limits)…")
+            break
+        step = it.get("step") or idx
+        header = f"STEP {step} — {it.get('name') or it.get('fskx')}"
+        block = header + "\n" + _pipeline_node_digest(it["fskx"], it["run_id"], per_node_limit)
+        if len(block) > per_node_limit * 2:
+            block = block[:per_node_limit * 2] + "\n…(truncated)…"
+        blocks.append(block)
+        total += len(block)
+
+    system = PIPELINE_CHAT_SYSTEM_PROMPT.format(pipeline_context="\n\n".join(blocks))
+    api_messages = []
+    for m in messages:
+        role = m.get("role")
+        text = (m.get("content") or "").strip()
+        if role in ("user", "assistant") and text:
+            api_messages.append({"role": role, "content": text})
+    if not api_messages:
+        raise RuntimeError("No message to send.")
+    return complete(cfg, system, api_messages, max_tokens)

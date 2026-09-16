@@ -140,6 +140,32 @@ def main():
           len(rec["provenance"]) == 1 and rec["provenance"][0]["source_run"] == "A"
           and rec["provenance"][0]["value_hash"])
 
+    # --- scenario-per-node: node.scenario reaches execute_fn and is part of config_hash ---
+    seen_scen = {}
+
+    def scen_execute_fn(fskx, scenario, params, injections, progress=None):
+        seen_scen[fskx] = scenario
+        outdir = os.path.join(tempfile.mkdtemp(), fskx.replace(".fskx", ""))
+        os.makedirs(outdir, exist_ok=True)
+        ic.write_bundle(produced.get(fskx, []), outdir, "Python",
+                        {"tool": "test", "modelId": fskx, "runId": os.path.basename(outdir)})
+        return {"ok": True, "outdir": outdir, "run_id": os.path.basename(outdir), "fskx": fskx}
+
+    p_scen = {"nodes": [{"id": "n1", "fskx": "A.fskx", "scenario": "growth_25C"},
+                        {"id": "n2", "fskx": "B.fskx", "scenario": "default"}],
+              "edges": [{"source": {"node": "n1", "param": "t"},
+                         "target": {"node": "n2", "param": "duration"},
+                         "transform": {"scale": 3600}}]}
+    rec_s = pl.run(p_scen, execute_fn=scen_execute_fn, load_ctx=fake_load_ctx)
+    check("scenario: run ok", rec_s["ok"])
+    check("scenario: per-node scenario reaches execute_fn",
+          seen_scen.get("A.fskx") == "growth_25C" and seen_scen.get("B.fskx") == "default")
+    nS = {"id": "n1", "fskx": "A.fskx", "scenario": "growth_25C", "params": {}}
+    nS2 = {"id": "n1", "fskx": "A.fskx", "scenario": "growth_5C", "params": {}}
+    p_h = {"nodes": [nS], "edges": [], "shared": []}
+    check("scenario: config_hash changes when scenario changes",
+          pl.config_hash(nS, p_h) != pl.config_hash(nS2, p_h))
+
     # --- run: missing upstream output is a clear failure ---
     execute_fn2, _ = make_executor(tempfile.mkdtemp(), {"A.fskx": []})  # A produces nothing
     rec2 = pl.run(p, execute_fn=execute_fn2, load_ctx=fake_load_ctx)

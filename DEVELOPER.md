@@ -176,6 +176,20 @@ resets on restart, orphaning otherwise-intact result folders).
   back to all runs if the run produced none. Render-time `chat_run_ids` still wins on the
   other pages — the hook is opt-in and backward compatible.
 
+- **Pipeline chat (multi-model).** The assembled results page (`/pipeline-results`) hosts a chat
+  scoped to a *selection* of node runs across possibly different models:
+  `/api/pipeline-chat` → `engine.chat_about_pipeline` → `aienv.chat_about_pipeline`. Its context
+  is deliberately **tighter than the per-model chat and PDF-free** — a wiring overview plus one
+  `_pipeline_node_digest` per node (model summary, config, joined inputs, and *clipped*
+  `results.json`/CSV-head samples), capped per-node (`per_node_limit≈1800`) and overall
+  (`total_limit≈16000`) — so full datasets are never sent. `_chat.html` gained opt-in override
+  hooks (`window.fskxChatEndpoint` / `fskxChatBody`, read at send time) + `chat_title`/`chat_intro`,
+  which the pipeline page uses; all other pages are unchanged.
+
+- **Exactly what each chat sends** — the per-model and pipeline contexts, every size cap, and the
+  refinement knobs are documented in `model-joining/llm-context.md`. Update it when you touch the
+  context builders.
+
 ---
 
 ## 3. Key components
@@ -363,6 +377,19 @@ These are real issues from building the tool. Keep them in mind before "simplify
     box, and in the `/api/chat` / `/api/ai/generate` errors. Keep the verification off the
     hot path — it costs one tiny API call.
 
+21. **Concurrent extraction of the same model races.** `extract_model` extracts into one dir
+    per model (`/work/<base>`) with an `rmtree`+re-extract. The Flask server is threaded, so two
+    simultaneous requests for the *same* model — e.g. the join page loading ports for two nodes
+    of one model at once, a legitimate "same model, different scenarios" workflow — had one
+    request delete/overwrite the dir the other was writing → `[Errno 17] File exists`.
+    Timing-dependent, so a reload usually masked it. Fix: a **per-base `threading.Lock`**
+    (`_extract_lock`) serialises extraction, and read-only callers (`model_param_specs`,
+    `model_info`) pass `extract_model(..., reuse=True)` to return an existing extraction instead
+    of wiping it; the join page also fetches each *unique* model once. Note the working dir is
+    shared **per model**, so it is reused **serially** during a pipeline run (safe, runs are
+    sequential) — running two same-model nodes *concurrently* (a future parallel-execution
+    feature) will need **per-node working dirs**.
+
 ## 5. Known limitations & future pitfalls
 
 - **Security: the Docker socket.** Mounting `/var/run/docker.sock` gives the app container
@@ -404,7 +431,11 @@ These are real issues from building the tool. Keep them in mind before "simplify
   that model's results (and image + env), `cleanup_all` deletes the whole `_results` tree.
   They are now browsable/comparable in the UI (Run history, see §2.y), but there is still
   **no retention cap** and **no "save to host folder"** option — both natural next steps.
-  Note removing a model's environment also wipes its run history.
+  Note removing a model's environment also wipes its run history. The model-joining
+  **portable export** (`Export + results` → a `.fskxp` that bundles these run folders, see
+  `model-joining/phase-C-persistent-state.md`) is effectively a manual "save results to a file"
+  for a whole workflow — opening the archive elsewhere restores the runs and shows results
+  without re-running. It does not prune or cap; large result sets make a large archive.
 
 - **Chat context size & cost.** `_gather_results_context` digests *all* (or the scoped) runs
   with per-run and total caps, and the paper PDF is resent on every turn (it rides the first

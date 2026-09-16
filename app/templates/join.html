@@ -26,6 +26,11 @@
     .tf-extra { display:flex; gap:6px; }
     .msg-err { color:var(--bad); } .msg-warn { color:var(--warn); } .ok { color:var(--good); }
     .nodestat { display:flex; align-items:center; gap:8px; padding:6px 0; }
+    .cmpsel { width:15px; height:15px; flex:none; cursor:pointer; accent-color:var(--accent); }
+    .cmpspacer { width:15px; flex:none; }
+    .cmpbar { display:flex; align-items:center; gap:10px; margin-top:10px;
+      padding-top:10px; border-top:1px solid var(--border); flex-wrap:wrap; }
+    .cmpbar .btn:disabled { opacity:.4; cursor:not-allowed; }
     .pill { font-size:.72rem; border-radius:10px; padding:1px 9px; }
     .pill.pending{background:var(--panel2);color:var(--muted)}
     .pill.start{background:rgba(255,200,87,.16);color:var(--warn)}
@@ -43,6 +48,8 @@
     .prow input[readonly] { background:var(--bg); color:var(--accent); font-style:italic; }
     .pclass { font-size:.68rem; color:var(--muted); }
     .bound-note { font-size:.72rem; color:var(--accent); }
+    .scen { padding:2px 6px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); border-radius:7px; font-size:.74rem; max-width:160px; }
     .node-id { font-family:ui-monospace,monospace; background:var(--panel2); color:var(--accent);
       border:1px solid var(--border); border-radius:5px; padding:1px 6px; }
     .node-card { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
@@ -102,11 +109,25 @@
       display:flex; align-items:center; justify-content:center; }
     .gname { font-weight:600; font-size:.84rem; line-height:1.2; max-width:150px;
       display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+    /* --- node label layouts (toggle in the canvas toolbar) --- */
+    /* Design 2: dedicated full-width title row inside the header; font auto-shrinks by length */
+    .gnode.mode-header .ghead { flex-direction:column; align-items:stretch; gap:6px; }
+    .ghead-top { display:flex; align-items:center; gap:7px; }
+    .gnode.mode-header .gname { max-width:none; width:100%; -webkit-line-clamp:2; }
+    /* Design 1: KNIME-style name centered below the node figure */
+    .gname-below { position:absolute; top:100%; left:-12px; right:-12px; margin-top:8px;
+      text-align:center; font-weight:600; line-height:1.2; color:var(--text);
+      display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+      pointer-events:none; text-shadow:0 1px 2px rgba(0,0,0,.45); }
     .gbadge { font-size:.62rem; padding:1px 6px; border-radius:999px; border:1px solid var(--border);
       color:var(--muted); flex:none; }
     .gbadge.python { color:#6cc1ff; border-color:#245; }
     .gbadge.r { color:#9ad; border-color:#346; }
     .gspring { flex:1; }
+    .gfoot { display:flex; align-items:center; gap:6px; padding:6px 10px; border-top:1px solid var(--border); }
+    .gfoot-lbl { font-size:.64rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; flex:none; }
+    .gscen { flex:1; min-width:0; padding:2px 6px; background:var(--panel2); color:var(--text);
+      border:1px solid var(--border); border-radius:7px; font-size:.72rem; }
     .gx { border:none; background:transparent; color:var(--muted); cursor:pointer; font-size:.85rem;
       padding:2px 4px; border-radius:5px; flex:none; }
     .gx:hover { color:var(--bad); background:rgba(255,107,107,.14); }
@@ -208,42 +229,50 @@
 
     <!-- SAVED PIPELINES -->
     <section>
-      <h2>0 · Saved pipelines</h2>
+      <h2>Workflow</h2>
       <div class="row-line" style="border-style:dashed">
         <div class="col" style="min-width:240px">
-          <label>Open a saved pipeline</label>
-          <select id="savedPick"><option value="">— none —</option></select>
+          <label>Open a saved workflow <span class="hint">(loads on select)</span></label>
+          <select id="savedPick" onchange="loadPipeline()"><option value="">— none —</option></select>
         </div>
-        <button class="btn secondary" type="button" onclick="loadPipeline()">Load</button>
         <button class="xbtn" type="button" onclick="deletePipeline()">Delete</button>
         <span style="flex:1"></span>
         <div class="col" style="min-width:200px">
           <label>Name</label>
-          <input id="pipeName" placeholder="My join pipeline">
+          <input id="pipeName" placeholder="My workflow">
         </div>
-        <button class="btn" type="button" onclick="savePipeline(false)">💾 Save</button>
+        <button class="btn" type="button" onclick="savePipeline(false)"
+                title="Save the workflow — wiring + which nodes are executed (their results travel with it)">💾 Save</button>
         <button class="btn secondary" type="button" onclick="savePipeline(true)">Save as new</button>
       </div>
       <div class="row-line" style="border-style:dashed">
         <span class="hint" id="currentLabel">Unsaved draft.</span>
         <span style="flex:1"></span>
-        <a class="btn secondary" id="exportBtn" href="#" onclick="return exportPipeline()">⬇ Export (.fskxp)</a>
+        <a class="btn secondary" id="exportBtn" href="#" onclick="return exportPipeline(false)"
+           title="Definition only — wiring + models + state references (smallest file)">⬇ Export</a>
+        <a class="btn secondary" id="exportResultsBtn" href="#" onclick="return exportPipeline(true)"
+           title="Portable — also bundles the run results, so it opens on another computer with results viewable and nodes already executed (no re-run). Larger file.">⬇ Export + results</a>
         <label class="btn secondary" style="cursor:pointer">⬆ Import
           <input type="file" accept=".fskxp,.zip" style="display:none" onchange="importPipeline(this)">
         </label>
       </div>
       <div id="saveMsg" class="hint"></div>
-      <div class="row-line" style="border-style:dashed">
-        <div class="col" style="min-width:300px">
-          <label>Saved states — node executions + model runs you saved</label>
-          <select id="runPick"><option value="">— none —</option></select>
+      <details class="snapshots" style="margin-top:6px">
+        <summary style="cursor:pointer;color:var(--muted);font-size:.9rem;user-select:none">
+          Snapshots — keep &amp; restore named execution checkpoints <span class="hint">(optional)</span>
+        </summary>
+        <div class="row-line" style="border-style:dashed;margin-top:8px">
+          <div class="col" style="min-width:300px">
+            <label>Saved states — node executions + model runs you saved</label>
+            <select id="runPick"><option value="">— none —</option></select>
+          </div>
+          <button class="btn secondary" type="button" onclick="loadPastRun()">Load</button>
+          <button class="xbtn" type="button" onclick="deletePastRun()">Delete</button>
+          <span style="flex:1"></span>
+          <button class="btn" type="button" onclick="savePastRun()" title="Save the current node executions + model runs as a named snapshot">💾 Save current state</button>
+          <span class="hint" id="runHistMsg"></span>
         </div>
-        <button class="btn secondary" type="button" onclick="loadPastRun()">Load</button>
-        <button class="xbtn" type="button" onclick="deletePastRun()">Delete</button>
-        <span style="flex:1"></span>
-        <button class="btn" type="button" onclick="savePastRun()" title="Save the current node executions + model runs as a named snapshot">💾 Save current state</button>
-        <span class="hint" id="runHistMsg"></span>
-      </div>
+      </details>
     </section>
 
     <!-- CANVAS -->
@@ -266,6 +295,8 @@
             <span class="zlevel" id="zlevel">100%</span>
             <button type="button" title="Zoom in" onclick="zoomBy(1.2)">+</button>
             <button type="button" title="Fit all" onclick="fitView()">Fit</button>
+            <button type="button" id="labelBtn" title="Switch how the model name is shown on each node"
+                    onclick="cycleLabelMode()">Label: Header</button>
             <button type="button" title="Fullscreen" id="maxBtn" onclick="toggleMax()">⛶</button>
           </div>
           <div id="world">
@@ -395,13 +426,16 @@ function refreshSaved(sel){
 }
 function savePipeline(asNew){
   const name = (document.getElementById('pipeName').value||'').trim() || currentName || 'Untitled pipeline';
-  const body = {name, pipeline: buildPipeline()};
+  // Phase C: pass the current workflow id so the server snapshots the live node-state into the
+  // saved record and migrates it onto the new pipeline id (a draft keeps its execution state).
+  const body = {name, pipeline: buildPipeline(), workflow_id: currentWorkflowId()};
   if(!asNew && currentId) body.id = currentId;
   fetch('/api/pipelines',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
       if(d.error){ flash('✕ '+d.error); return; }
       currentId=d.id; currentName=d.name; saveState(); updateCurrentLabel();
-      refreshSaved(d.id); flash('💾 Saved “'+d.name+'”.');
+      refreshSaved(d.id); refreshNodeState();  // badges now read under the saved id
+      flash('💾 Saved “'+d.name+'”.');
     });
 }
 function loadPipeline(){
@@ -419,6 +453,7 @@ function loadRecord(rec){
     const m = MODELS.find(x=>x.fskx===n.fskx)||{};
     nodes.push({id:n.id, fskx:n.fskx, label:m.label||n.fskx, name:null, language:null,
                 params:null, fields:null, values:Object.assign({}, n.params||{}), error:null,
+                scenarios:[], scenario:(n.scenario!=null?n.scenario:null),
                 x:(n.x!=null?n.x:null), y:(n.y!=null?n.y:null), expand:{}});
     const num=parseInt(String(n.id).replace(/\D/g,''),10); if(num>maxSeq) maxSeq=num;
   });
@@ -438,16 +473,55 @@ function loadRecord(rec){
     shared.push({value:String(s.value), dataType:s.dataType||'DOUBLE', node:t.node, param:t.param}); }); });
   nodes.forEach(ensurePos);
   renderAll();
-  // re-fetch each model's ports + fields, then fit the view
-  let pending = nodes.length;
-  nodes.forEach(node=>{
-    fetch('/api/model-params/'+encodeURIComponent(node.fskx)).then(r=>r.json()).then(d=>{
-      if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields; }
-      else node.error=d.error||'could not read model';
+  // re-fetch each model's ports + fields, then fit the view. Group by (model, scenario) — the
+  // ports (params) and scenario list are scenario-independent, but the editable `fields`
+  // (defaults) are per-scenario, so two same-model nodes on different scenarios need their
+  // own fetch. Grouping still de-dupes the common case (same model+scenario) and avoids two
+  // concurrent requests racing the same server-side extraction.
+  const SEP = '\u0000';  // NUL: never appears in a filename or scenario id
+  const byKey = {};
+  nodes.forEach(n=>{ const k=n.fskx+SEP+(n.scenario||''); (byKey[k]=byKey[k]||[]).push(n); });
+  const keys = Object.keys(byKey);
+  let pending = keys.length;
+  if(!pending){ requestAnimationFrame(fitView); }
+  keys.forEach(k=>{
+    const [fskx, scen] = k.split(SEP);
+    const url = '/api/model-params/'+encodeURIComponent(fskx) + (scen?('?scenario='+encodeURIComponent(scen)):'');
+    fetch(url).then(r=>r.json()).then(d=>{
+      byKey[k].forEach(node=>{
+        if(d.ok){ node.name=d.name; node.language=d.language;
+                  node.params=JSON.parse(JSON.stringify(d.params));
+                  node.fields=JSON.parse(JSON.stringify(d.fields));
+                  node.scenarios=d.scenarios||[];
+                  if(!node.scenario) node.scenario=d.selected_scenario||null; }
+        else node.error=d.error||'could not read model';
+      });
       renderAll();
       if(--pending<=0) requestAnimationFrame(fitView);
     });
   });
+  // Phase C: a saved pipeline carries its node-state. Restore it into the live side-file under
+  // this pipeline's workflow id so executed/clean badges + cache reuse come back. Missing
+  // _results runs (e.g. after import on another machine) degrade safely to "stale" on refresh.
+  if(rec.node_state && Object.keys(rec.node_state).length){
+    canvasRunMode = false;
+    fetch('/api/pipeline/restore-state',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({workflow_id: currentWorkflowId(), state: rec.node_state})})
+      .then(()=>refreshNodeState()).catch(()=>{});
+    // Surface the executed nodes' results so a loaded/imported workflow shows them right away
+    // (the canvas still shows clean/green badges; this is the per-node "view results" list).
+    const fskxOf = {}; (p.nodes||[]).forEach(n=>{ fskxOf[n.id]=n.fskx; });
+    const map = {}, results = {};
+    Object.entries(rec.node_state).forEach(([nid,s])=>{
+      map[nid] = (s.ok===false) ? 'failed' : 'done';
+      results[nid] = {run_id:s.run_id, fskx:fskxOf[nid], ok:s.ok!==false};
+    });
+    renderRunList([], {map, results});
+    const rsec = document.getElementById('runSection');
+    if(rsec) rsec.style.display='block';
+    const rmsg = document.getElementById('runMsg');
+    if(rmsg) rmsg.innerHTML = '<span class="hint">Loaded an executed workflow — open a node’s “view results” below, or click its green ✓.</span>';
+  }
   flash('Loaded “'+rec.name+'”.');
 }
 function deletePipeline(){
@@ -459,18 +533,28 @@ function deletePipeline(){
     updateCurrentLabel(); refreshSaved(); flash('Deleted.');
   });
 }
-function exportPipeline(){
+function exportPipeline(withResults){
   if(!currentId){ flash('Save the pipeline first, then export.'); return false; }
-  window.location = '/api/pipelines/'+currentId+'/export';
+  window.location = '/api/pipelines/'+currentId+'/export' + (withResults ? '?results=1' : '');
   return false;
 }
 function importPipeline(input){
   const f = input.files[0]; if(!f) return;
+  // Import is for workflow archives (.fskxp), not single models (.fskx).
+  if(/\.fskx$/i.test(f.name)){
+    input.value='';
+    flash('✕ That’s a single model (.fskx). Import expects a workflow archive (.fskxp). To use a single model, add it from “Add a model as a node” below.');
+    return;
+  }
   const fd = new FormData(); fd.append('file', f);
   fetch('/api/pipelines/import',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
     input.value='';
     if(d.error){ flash('✕ '+d.error); return; }
-    refreshSaved(d.id); flash('Imported “'+d.name+'”. Select it above and Load.');
+    refreshSaved(d.id);
+    // Load it straight onto the canvas (there's no Load button, and re-selecting the
+    // now-selected dropdown item wouldn't fire its loader).
+    fetch('/api/pipelines/'+d.id).then(r=>r.json()).then(loadRecord);
+    flash('Imported “'+d.name+'”.');
   });
 }
 
@@ -532,8 +616,8 @@ function reachable(from, to){
 function ensurePos(n){
   if(n.x==null || n.y==null){
     const k = nodes.indexOf(n); const i = k<0 ? nodes.length : k;
-    n.x = 40 + (i % 3) * 300;
-    n.y = 40 + Math.floor(i / 3) * 240;
+    n.x = 40 + (i % 3) * 320;
+    n.y = 40 + Math.floor(i / 3) * 320;
   }
   if(!n.expand) n.expand = {};
 }
@@ -548,13 +632,27 @@ function autoLayout(){
         depth[e.tgt_node] = Math.max(depth[e.tgt_node], depth[e.src_node]+1);
     });
   }
-  const perCol = {};
-  nodes.forEach(n=>{
-    const d = depth[n.id]||0; perCol[d] = (perCol[d]||0);
-    n.x = 40 + d*320; n.y = 40 + perCol[d]*250; perCol[d]++;
-  });
+  // Group nodes into columns by dependency depth (preserving order).
+  const cols = {};
+  nodes.forEach(n=>{ const d = depth[n.id]||0; (cols[d] = cols[d]||[]).push(n); });
+  // Assign x now; y needs real node heights (a node's height varies with its port count),
+  // so render once, measure from the DOM, then stack each column by cumulative height.
+  Object.keys(cols).forEach(d=>{ cols[d].forEach(n=>{ n.x = 40 + (+d)*340; }); });
   renderAll();
-  requestAnimationFrame(fitView);
+  requestAnimationFrame(()=>{
+    const GAP = 46;  // vertical breathing room between stacked nodes
+    const extra = (nodeLabelMode==='below') ? 40 : 0;  // clear the floating "below" label
+    Object.keys(cols).forEach(d=>{
+      let y = 40;
+      cols[d].forEach(n=>{
+        n.y = y;
+        const el = document.querySelector('#canvasNodes .gnode[data-node="'+n.id+'"]');
+        y += (el ? el.offsetHeight : 170) + GAP + extra;
+      });
+    });
+    renderAll();
+    requestAnimationFrame(fitView);
+  });
 }
 
 function visiblePorts(node, list, col){
@@ -569,6 +667,28 @@ function toggleExpand(nodeId, col){
   n.expand[col] = !n.expand[col]; renderAll();
 }
 
+// Node-name layout mode: 'header' (full-width title row, auto-shrink font) | 'below' (KNIME-style).
+let nodeLabelMode = (function(){ try{ return localStorage.getItem('fskx_join_labelmode') || 'header'; }catch(e){ return 'header'; } })();
+function applyLabelBtn(){
+  const b = document.getElementById('labelBtn');
+  if(b) b.textContent = 'Label: ' + (nodeLabelMode==='below' ? 'Below' : 'Header');
+}
+function cycleLabelMode(){
+  nodeLabelMode = (nodeLabelMode==='header') ? 'below' : 'header';
+  try{ localStorage.setItem('fskx_join_labelmode', nodeLabelMode); }catch(e){}
+  applyLabelBtn();
+  renderCanvas();
+  requestAnimationFrame(drawWires);
+}
+// Auto-shrink the model name by length so long titles stay on ~2 lines without overflowing.
+function nameFont(name){
+  const L = (name||'').length;
+  if(L<=16) return '0.92rem';
+  if(L<=26) return '0.84rem';
+  if(L<=40) return '0.77rem';
+  if(L<=56) return '0.71rem';
+  return '0.66rem';
+}
 function renderCanvas(){
   const layer = document.getElementById('canvasNodes');
   document.getElementById('canvasEmpty').style.display = nodes.length ? 'none':'flex';
@@ -605,18 +725,40 @@ function renderCanvas(){
     } else {
       body = n.error ? `<div class="gerr">${n.error}</div>` : `<div class="gloading">loading…</div>`;
     }
-    box.innerHTML = `<div class="ghead"><span class="gstep" title="execution step">${stepOf[n.id]||'?'}</span>
-      <span class="gname" title="${(n.name||n.label||'').replace(/"/g,'&quot;')}">${n.name||n.label}</span>${lang}
-      <span class="gspring"></span>
+    const title = n.name || n.label || '';
+    const titleEsc = title.replace(/"/g,'&quot;');
+    const fs = nameFont(title);
+    const nameEl = `<span class="gname" style="font-size:${fs}" title="${titleEsc}">${title}</span>`;
+    const ctrls = `<span class="gspring"></span>
       <span class="gstat"></span>
       <button class="gact gexec" title="Execute up to here (run this node + any stale upstream)">▶</button>
       <button class="gact greset" title="Reset this node and everything downstream">↺</button>
-      <button class="gx" title="remove">✕</button></div>${body}`;
+      <button class="gx" title="remove">✕</button>`;
+    const stepEl = `<span class="gstep" title="execution step">${stepOf[n.id]||'?'}</span>`;
+    let headHtml, belowHtml = '';
+    if(nodeLabelMode === 'below'){
+      box.classList.add('mode-below');
+      headHtml = `<div class="ghead">${stepEl}${lang}${ctrls}</div>`;
+      belowHtml = `<div class="gname-below" style="font-size:${fs}" title="${titleEsc}">${title}</div>`;
+    } else {
+      box.classList.add('mode-header');
+      headHtml = `<div class="ghead"><div class="ghead-top">${stepEl}${lang}${ctrls}</div>${nameEl}</div>`;
+    }
+    // Per-node scenario picker on the canvas (only when the model has >1 scenario).
+    let footHtml = '';
+    if(n.params && n.scenarios && n.scenarios.length > 1){
+      const opts = n.scenarios.map(s=>`<option value="${String(s).replace(/"/g,'&quot;')}" ${s===n.scenario?'selected':''}>${s}</option>`).join('');
+      footHtml = `<div class="gfoot"><span class="gfoot-lbl">scenario</span><select class="gscen">${opts}</select></div>`;
+    }
+    box.innerHTML = headHtml + body + footHtml + belowHtml;
     layer.appendChild(box);
+    const sc = box.querySelector('.gscen');
+    if(sc) sc.addEventListener('change', ev=>{ ev.stopPropagation(); setScenario(n.id, sc.value); });
 
     const head = box.querySelector('.ghead');
     head.addEventListener('pointerdown', ev=>{
-      if(ev.target.closest('.gx') || ev.target.closest('.gact')) return;
+      // Don't start a drag from the controls or the status link (the ✓ → results link).
+      if(ev.target.closest('.gx') || ev.target.closest('.gact') || ev.target.closest('.gstat')) return;
       beginNodeDrag(ev, box, n);
     });
     box.querySelector('.gx').addEventListener('click', ()=>removeNode(n.id));
@@ -864,13 +1006,14 @@ function addNode(){
   seq += 1;
   const node = {id:'n'+seq, fskx, label:(MODELS.find(m=>m.fskx===fskx)||{}).label||fskx,
                 name:null, language:null, params:null, fields:null, values:{}, error:null,
-                x:null, y:null, expand:{}};
+                scenarios:[], scenario:null, x:null, y:null, expand:{}};
   ensurePos(node);
   nodes.push(node);
   renderAll();
   fetch('/api/model-params/'+encodeURIComponent(fskx))
     .then(r=>r.json()).then(d=>{
-      if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields; }
+      if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields;
+                node.scenarios=d.scenarios||[]; node.scenario=d.selected_scenario||null; }
       else { node.error = d.error || 'could not read model'; }
       renderAll();
     }).catch(e=>{ node.error=String(e); renderAll(); });
@@ -884,6 +1027,23 @@ function removeNode(id){
 }
 function setVal(id, fid, v){
   const n = nodes.find(x=>x.id===id); if(n){ n.values = n.values||{}; n.values[fid]=v; saveState(); }
+}
+function scenarioPicker(n){
+  // Only meaningful when a model declares more than one scenario; a single-scenario model
+  // just runs it (no chooser). Scenario rides in node config (config_hash) → changing it
+  // invalidates this node's cache and everything downstream on the next run.
+  if(!n.scenarios || n.scenarios.length<2) return '';
+  const opts = n.scenarios.map(s=>`<option value="${String(s).replace(/"/g,'&quot;')}" ${s===n.scenario?'selected':''}>${s}</option>`).join('');
+  return `<select class="scen" title="Simulation scenario" onchange="setScenario('${n.id}',this.value)">${opts}</select>`;
+}
+function setScenario(id, scen){
+  const n = nodes.find(x=>x.id===id); if(!n) return;
+  n.scenario = scen;
+  // Re-derive the editable fields for the chosen scenario (defaults differ per scenario).
+  // User overrides in n.values are keyed by param id and intentionally preserved.
+  fetch('/api/model-params/'+encodeURIComponent(n.fskx)+'?scenario='+encodeURIComponent(scen))
+    .then(r=>r.json()).then(d=>{ if(d.ok){ n.fields=d.fields; } renderAll(); saveState(); })
+    .catch(()=>{ renderAll(); saveState(); });
 }
 function paramEditor(n){
   if(!n.fields || !n.fields.length) return '<div class="hint">No editable parameters.</div>';
@@ -916,7 +1076,7 @@ function renderNodes(){
     const div = document.createElement('div');
     div.className = 'card';
     div.innerHTML = `<div class="node-card"><span class="node-id">step ${stepOf[n.id]||'?'}</span>
-      <strong>${n.name||n.label}</strong> ${lang} ${stat}
+      <strong>${n.name||n.label}</strong> ${lang} ${stat} ${scenarioPicker(n)}
       <span style="flex:1"></span>
       <button class="xbtn" onclick="removeNode('${n.id}')">remove</button></div>
       ${n.fields ? `<details style="margin-top:8px"><summary class="note">Parameters</summary>${paramEditor(n)}</details>`:''}`;
@@ -1057,7 +1217,7 @@ function buildPipeline(){
             : (f.display!==undefined ? f.display : '');
       if(v!==undefined && v!=='') params[f.id]=v;
     });
-    p.nodes.push({id:n.id, fskx:n.fskx, params, x:n.x, y:n.y});
+    p.nodes.push({id:n.id, fskx:n.fskx, scenario:n.scenario||null, params, x:n.x, y:n.y});
   });
   edges.forEach(e=>{
     if(!(e.src_node&&e.src_param&&e.tgt_node&&e.tgt_param)) return;
@@ -1159,7 +1319,7 @@ function applyRunState(){
                   : (s==='blocked'||s==='skipped') ? '⊘' : '';
       if((s==='done'||s==='cached'||s==='failed') && r && r.run_id){
         const tip = s==='failed' ? 'view run log' : s==='cached' ? 'reused from cache — view results' : 'view results';
-        stat.innerHTML = `<a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}" title="${tip}">${glyph}</a>`;
+        stat.innerHTML = `<a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}" target="_blank" rel="noopener" title="${tip}">${glyph}</a>`;
       } else {
         stat.textContent = glyph;
       }
@@ -1204,7 +1364,7 @@ function applyNodePlan(){
     if(stat){
       stat.classList.add(cls);
       if(cls==='node-clean' && ex && ex.run_id){
-        stat.innerHTML = `<a href="/runs/${encodeURIComponent(ex.fskx)}/${ex.run_id}" title="${tip}">${glyph}</a>`;
+        stat.innerHTML = `<a href="/runs/${encodeURIComponent(ex.fskx)}/${ex.run_id}" target="_blank" rel="noopener" title="${tip}">${glyph}</a>`;
       } else { stat.textContent = glyph; stat.title = tip; }
     }
   });
@@ -1249,15 +1409,75 @@ function resetNode(nid){
 // shared renderers (used by both a live run and a replayed run from history)
 function renderRunList(order, rs){
   order = (order && order.length) ? order : nodes.map(n=>n.id);
-  document.getElementById('nodeStates').innerHTML = order.map((id,idx)=>{
+  let anyRun = false;
+  const rows = order.map((id,idx)=>{
     const st = rs.map[id] || 'pending';
     const node = nodes.find(n=>n.id===id) || {label:id};
     const r = rs.results[id];
     const linkLabel = st==='failed' ? 'view log' : 'view results';
-    const link = (r && r.run_id) ? ` · <a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}">${linkLabel}</a>` : '';
-    return `<div class="nodestat"><span class="node-id">step ${idx+1}</span>
+    const hasRun = !!(r && r.run_id);
+    if(hasRun) anyRun = true;
+    // A checkbox lets the user pick runs to compare. Compare is per-model (the /compare page
+    // unions one model's params), so we tag each box with its fskx and validate on submit.
+    const cb = hasRun
+      ? `<input type="checkbox" class="cmpsel" data-fskx="${encodeURIComponent(r.fskx)}" data-run="${r.run_id}" data-node="${id}" title="Select to view (or compare) this run's results" onchange="updateCompareBar()">`
+      : `<span class="cmpspacer"></span>`;
+    const link = hasRun ? ` · <a href="/runs/${encodeURIComponent(r.fskx)}/${r.run_id}" target="_blank" rel="noopener">${linkLabel}</a>` : '';
+    return `<div class="nodestat">${cb}<span class="node-id">step ${idx+1}</span>
       <span class="pill ${st}">${st}</span> ${node.name||node.label}${link}</div>`;
   }).join('');
+  const bar = anyRun
+    ? `<div class="cmpbar">
+         <button class="btn" type="button" id="viewBtn" onclick="viewSelectedResults()" disabled>View selected results</button>
+         <button class="btn secondary" type="button" id="cmpBtn" onclick="compareSelected()" disabled title="Compare runs of the same model side by side">Compare</button>
+         <span class="hint" id="cmpHint"></span>
+       </div>`
+    : '';
+  document.getElementById('nodeStates').innerHTML = rows + bar;
+  updateCompareBar();
+}
+// One selection, two actions: "View selected results" assembles any chosen nodes (even different
+// models) on one page; "Compare" is the niche same-model param-diff and only enables when every
+// selected run is the same model.
+function updateCompareBar(){
+  const sel = [...document.querySelectorAll('.cmpsel:checked')];
+  const hint = document.getElementById('cmpHint');
+  const viewBtn = document.getElementById('viewBtn');
+  const cmpBtn = document.getElementById('cmpBtn');
+  if(!hint) return;
+  const fskxs = new Set(sel.map(c=>c.dataset.fskx));
+  const sameModel = sel.length>=2 && fskxs.size===1;
+  if(viewBtn) viewBtn.disabled = sel.length<1;
+  if(cmpBtn) cmpBtn.disabled = !sameModel;
+  if(sel.length===0) hint.textContent = 'Tick node results to view them together; tick 2+ of the same model to also compare.';
+  else if(sel.length===1) hint.textContent = '1 selected — view its results, or tick more.';
+  else if(sameModel) hint.textContent = `${sel.length} selected (same model) — view together or compare.`;
+  else hint.textContent = `${sel.length} selected — view together. (Compare needs a single model.)`;
+}
+function viewSelectedResults(){
+  const sel = [...document.querySelectorAll('.cmpsel:checked')];
+  const hint = document.getElementById('cmpHint');
+  if(sel.length<1){ if(hint) hint.textContent = 'Pick at least one run to view.'; return; }
+  // POST the selection + current wiring so the results page can attribute each joined input to
+  // its source node and ground the chat on the chain. data-fskx is URI-encoded for transport.
+  const items = sel.map(c=>({fskx:decodeURIComponent(c.dataset.fskx), run_id:c.dataset.run, node:c.dataset.node}));
+  const payload = JSON.stringify({items, pipeline: buildPipeline()});
+  const form = document.createElement('form');
+  form.method = 'POST'; form.action = '/pipeline-results'; form.target = '_blank';
+  const inp = document.createElement('input');
+  inp.type = 'hidden'; inp.name = 'payload'; inp.value = payload;
+  form.appendChild(inp); document.body.appendChild(form);
+  form.submit(); form.remove();
+}
+function compareSelected(){
+  const sel = [...document.querySelectorAll('.cmpsel:checked')];
+  const hint = document.getElementById('cmpHint');
+  if(sel.length<2){ if(hint) hint.textContent = 'Pick at least two runs.'; return; }
+  const fskxs = new Set(sel.map(c=>c.dataset.fskx));
+  if(fskxs.size>1){ if(hint) hint.textContent = 'Compare works within a single model — deselect runs from other models.'; return; }
+  const fskx = sel[0].dataset.fskx;  // already URI-encoded
+  const ids = sel.map(c=>c.dataset.run);
+  window.open('/compare/'+fskx+'?runs='+ids.join(','), '_blank', 'noopener');
 }
 function renderProvenance(prov){
   const el = document.getElementById('provenance');
@@ -1361,6 +1581,7 @@ function runHistFlash(msg){ const m=document.getElementById('runHistMsg'); if(m)
 loadState();
 nodes.forEach(ensurePos);
 if(currentName) document.getElementById('pipeName').value = currentName;
+applyLabelBtn();
 renderAll();
 applyTransform();
 refreshSaved();
@@ -1369,8 +1590,11 @@ refreshNodeState();
 // model ports may not be cached in this draft — re-fetch any node missing params
 nodes.forEach(node=>{
   if(node.params) return;
-  fetch('/api/model-params/'+encodeURIComponent(node.fskx)).then(r=>r.json()).then(d=>{
-    if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields; }
+  const url = '/api/model-params/'+encodeURIComponent(node.fskx)
+            + (node.scenario?('?scenario='+encodeURIComponent(node.scenario)):'');
+  fetch(url).then(r=>r.json()).then(d=>{
+    if(d.ok){ node.name=d.name; node.language=d.language; node.params=d.params; node.fields=d.fields;
+              node.scenarios=d.scenarios||[]; if(!node.scenario) node.scenario=d.selected_scenario||null; }
     else node.error=d.error||'could not read model';
     renderAll();
   }).catch(()=>{});

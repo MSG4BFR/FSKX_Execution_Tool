@@ -36,6 +36,10 @@ from xml.sax.saxutils import escape, quoteattr
 WORK_DIR = os.environ.get("FSKX_WORK_DIR", "/tmp/fskx_work")
 MODELS_DIR = os.environ.get("FSKX_MODELS_DIR", "/models")
 PIPELINES_DIR = os.path.join(WORK_DIR, "_pipelines")
+# Per-node run artifacts live at  RESULTS_ROOT/<base>/<run_id>/  (mirrors engine.RESULTS_ROOT).
+# A "portable" export bundles the run folders referenced by the saved node-state so the archive
+# can be opened on another machine with results viewable and nodes clean — no re-run.
+RESULTS_ROOT = os.path.join(WORK_DIR, "_results")
 
 ARCHIVE_EXT = ".fskxp"
 ARCHIVE_FORMAT = "fskx-pipeline"
@@ -123,18 +127,31 @@ def _now():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def save(pipeline, name, pid=None):
+def save(pipeline, name, pid=None, node_state=None):
     """Create or update a named pipeline. Returns the stored record. Updating preserves the
-    original ``created`` timestamp."""
+    original ``created`` timestamp.
+
+    ``node_state`` (Phase C — persistent live node state) is the per-node execution map
+    (``{nid: {run_id, cache_hash, ok, executed_at}}``) snapshotted *with* the workflow, so
+    saving a pipeline also saves its execution state and an exported ``.fskxp`` carries the
+    cached-run identity. It is stored at the record top level, parallel to ``pipeline`` — the
+    wiring object handed to ``pipeline.validate`` / ``pipeline.run`` is untouched. When
+    ``node_state is None`` the existing record's state is preserved on update (a metadata-only
+    save never wipes execution state); a brand-new record defaults to ``{}``. It only
+    **references** ``_results`` runs by id — no artifacts are copied (HANDOFF §2)."""
     _ensure_dir()
     created = _now()
+    existing = {}
     if pid and safe_id(pid) and os.path.exists(_path(pid)):
         existing = load(pid) or {}
         created = existing.get("created", created)
     else:
         pid = uuid.uuid4().hex[:12]
+    if node_state is None:
+        node_state = existing.get("node_state", {}) or {}
     record = {"id": pid, "name": (name or "Untitled pipeline").strip(),
-              "created": created, "modified": _now(), "pipeline": pipeline}
+              "created": created, "modified": _now(), "pipeline": pipeline,
+              "node_state": node_state}
     with open(_path(pid), "w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2)
     return record
@@ -192,19 +209,45 @@ def member_models(record):
     return sorted({n["fskx"] for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")})
 
 
-def build_archive(pid, models_dir=None):
+def _node_runs(record):
+    """The ``(base, run_id)`` pairs referenced by a record's saved node-state, deduped. ``base``
+    is the member model's folder name (``splitext(fskx)[0]``), matching ``engine`` layout."""
+    fskx_of = {n["id"]: n.get("fskx")
+               for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")}
+    seen, out = set(), []
+    for nid, s in (record.get("node_state") or {}).items():
+        rid, fskx = s.get("run_id"), fskx_of.get(nid)
+        if not (rid and fskx):
+            continue
+        base = os.path.splitext(fskx)[0]
+        if (base, rid) in seen:
+            continue
+        seen.add((base, rid))
+        out.append((base, rid))
+    return out
+
+
+def build_archive(pid, models_dir=None, include_results=False, results_root=None):
     """Write a COMBINE/OMEX-conformant ``.fskxp`` archive for a saved pipeline. Returns
     (tmp_path, name) or None. Embeds every member ``.fskx`` that exists in ``models_dir`` so
-    the archive is self-contained, and registers everything in an ``omexManifest``."""
+    the archive is self-contained, and registers everything in an ``omexManifest``.
+
+    When ``include_results`` is set (the *portable* export), the run folders referenced by the
+    saved node-state are copied under ``results/<base>/<run_id>/`` too, so the archive opens on
+    another machine with results viewable and the nodes clean (the content hash recomputes to a
+    match and the run folders now exist) — no re-run needed. This trades a larger archive for
+    portability; the lean default carries only the definition + state references."""
     record = load(pid)
     if not record:
         return None
     models_dir = models_dir or MODELS_DIR
+    results_root = results_root or RESULTS_ROOT
     fd, tmp = tempfile.mkstemp(suffix=ARCHIVE_EXT)
     os.close(fd)
     members = member_models(record)
     missing = []
-    embedded = []  # archive-relative locations of members actually written
+    embedded = []       # archive-relative locations of members actually written
+    result_locs = []    # archive-relative locations of bundled result files
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(PIPELINE_JSON, json.dumps(record, indent=2))
         for f in members:
@@ -214,15 +257,30 @@ def build_archive(pid, models_dir=None):
                 embedded.append("./models/" + f)
             else:
                 missing.append(f)
-        # OMEX manifest: master pipeline + each embedded member + the legacy json manifest.
-        locations = ["./" + PIPELINE_JSON] + embedded + ["./manifest.json", "./" + METADATA_RDF]
+        if include_results:
+            for base, rid in _node_runs(record):
+                run_path = os.path.join(results_root, base, rid)
+                if not os.path.isdir(run_path):
+                    continue
+                for dirpath, _dirs, fnames in os.walk(run_path):
+                    for fn in fnames:
+                        ap = os.path.join(dirpath, fn)
+                        rel = os.path.relpath(ap, results_root).replace(os.sep, "/")
+                        arc = "results/" + rel
+                        z.write(ap, arc)
+                        result_locs.append("./" + arc)
+        # OMEX manifest: master pipeline + each embedded member + bundled results + json manifest.
+        locations = (["./" + PIPELINE_JSON] + embedded + result_locs
+                     + ["./manifest.json", "./" + METADATA_RDF])
         z.writestr(MANIFEST_XML, build_manifest_xml(locations, master="./" + PIPELINE_JSON))
         z.writestr(METADATA_RDF, build_metadata_rdf(record))
         # Legacy human-readable manifest (also registered above), kept for older readers.
         z.writestr("manifest.json", json.dumps({
             "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION,
             "name": record["name"], "models": members,
-            "missing_models": missing}, indent=2))
+            "missing_models": missing,
+            "with_results": bool(include_results and result_locs),
+            "result_files": len(result_locs)}, indent=2))
     return tmp, record["name"]
 
 
@@ -241,12 +299,29 @@ def _master_location(z):
     return None
 
 
-def import_archive(path, models_dir=None):
+def _safe_rel(prefix, name):
+    """The path under ``prefix`` for a zip entry, or None if it escapes (traversal/absolute)."""
+    rel = name[len(prefix):]
+    if not rel or rel.endswith("/"):
+        return None
+    norm = os.path.normpath(rel)
+    if os.path.isabs(norm) or norm.startswith(".." + os.sep) or norm == "..":
+        return None
+    return norm
+
+
+def import_archive(path, models_dir=None, results_root=None):
     """Read a ``.fskxp`` archive: restore any member ``.fskx`` not already present, then save
     the pipeline as a NEW record (fresh id). Returns the saved record. Reads the OMEX
     ``manifest.xml`` to locate the master pipeline record when present, falling back to
-    ``pipeline.json`` for older plain-zip archives. Guards zip entry paths against traversal."""
+    ``pipeline.json`` for older plain-zip archives. Guards zip entry paths against traversal.
+
+    If the archive carries bundled run artifacts (``results/<base>/<run_id>/…`` — a *portable*
+    export), they are restored into ``results_root`` so the saved node-state references resolve:
+    the nodes recompute to *clean* and their results are viewable without re-running. Existing
+    local runs are never clobbered (an identical run id already present wins)."""
     models_dir = models_dir or MODELS_DIR
+    results_root = results_root or RESULTS_ROOT
     os.makedirs(models_dir, exist_ok=True)
     with zipfile.ZipFile(path) as z:
         master = _master_location(z)
@@ -255,13 +330,26 @@ def import_archive(path, models_dir=None):
             master = PIPELINE_JSON
         record = json.loads(z.read(master).decode("utf-8"))
         for n in z.namelist():
-            if not (n.startswith("models/") and n.endswith(".fskx")):
-                continue
-            base = os.path.basename(n)
-            if not base or base != n[len("models/"):]:  # reject nested / traversal
-                continue
-            target = os.path.join(models_dir, base)
-            if not os.path.exists(target):
+            if n.startswith("models/") and n.endswith(".fskx"):
+                base = os.path.basename(n)
+                if not base or base != n[len("models/"):]:  # reject nested / traversal
+                    continue
+                target = os.path.join(models_dir, base)
+                if not os.path.exists(target):
+                    with z.open(n) as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+            elif n.startswith("results/"):
+                rel = _safe_rel("results/", n)
+                if not rel:
+                    continue
+                target = os.path.join(results_root, rel)
+                if os.path.exists(target):       # never clobber a local run's artifacts
+                    continue
+                os.makedirs(os.path.dirname(target), exist_ok=True)
                 with z.open(n) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
-    return save(record.get("pipeline", {}), record.get("name", "Imported pipeline"))
+    # Carry the embedded node-state (Phase C) into the new record. With a portable archive the
+    # restored run folders make these references resolve → nodes show clean. Without results,
+    # the missing runs degrade safely to "stale" and re-run (HANDOFF §2 "when in doubt, stale").
+    return save(record.get("pipeline", {}), record.get("name", "Imported pipeline"),
+                node_state=record.get("node_state"))

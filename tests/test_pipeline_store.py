@@ -72,6 +72,34 @@ def main():
           and len(ps.load(pid)["pipeline"]["nodes"]) == 1
           and rec2["modified"] >= rec["modified"])
 
+    # --- Phase C: node-state persisted with the record ---
+    ns = {"n1": {"run_id": "r1", "cache_hash": "h1", "ok": True},
+          "n2": {"run_id": "r2", "cache_hash": "h2", "ok": True}}
+    recns = ps.save(pipe, "With state", pid=pid, node_state=ns)
+    check("save stores node_state",
+          recns.get("node_state") == ns and ps.load(pid).get("node_state") == ns)
+    # a metadata-only save (node_state omitted) must NOT wipe the execution state
+    ps.save(pipe, "Renamed again", pid=pid)
+    check("update without node_state preserves it", ps.load(pid).get("node_state") == ns)
+    # an explicit state overwrites; explicit {} clears
+    ps.save(pipe, "Cleared", pid=pid, node_state={})
+    check("explicit node_state overwrites", ps.load(pid).get("node_state") == {})
+    # a brand-new record defaults to an empty state
+    fresh = ps.save(pipe, "Fresh")
+    check("new record defaults node_state to {}", fresh.get("node_state") == {})
+    ps.delete(fresh["id"])
+    # leave the known state in place for the export/import round-trip below
+    ps.save(pipe, "With state", pid=pid, node_state=ns)
+    # back-compat: a record file lacking node_state loads fine (absent key tolerated)
+    oldrec = {"id": "oldcompat", "name": "Old", "created": "x", "modified": "x",
+              "pipeline": pipe}
+    with open(os.path.join(ps.PIPELINES_DIR, "oldcompat.json"), "w") as fh:
+        __import__("json").dump(oldrec, fh)
+    loaded_old = ps.load("oldcompat")
+    check("record without node_state still loads",
+          loaded_old is not None and "node_state" not in loaded_old)
+    ps.delete("oldcompat")
+
     # --- traversal guard ---
     check("rejects unsafe id", ps.load("../etc/passwd") is None and not ps.safe_id("a/b"))
 
@@ -132,6 +160,51 @@ def main():
           and os.path.exists(os.path.join(fresh_models, "B.fskx")))
     check("imported pipeline matches original definition",
           imported["pipeline"]["edges"][0]["transform"] == {"scale": 3600})
+    check("export -> import round-trips node_state (Phase C)",
+          imported.get("node_state") == ns)
+
+    # --- portable export: bundle + restore result artifacts (KNIME-style) ---
+    import json as _json
+    # the lean archive (built above) must NOT carry result artifacts
+    with zipfile.ZipFile(arch) as z:
+        check("lean export carries no result artifacts",
+              not any(n.startswith("results/") for n in z.namelist()))
+    # create the run folders the node-state references: _results/<base>/<run_id>/
+    for base, rid in (("A", "r1"), ("B", "r2")):
+        rd = os.path.join(ps.RESULTS_ROOT, base, rid)
+        os.makedirs(rd, exist_ok=True)
+        with open(os.path.join(rd, "outputs.json"), "w") as fh:
+            fh.write('{"params":{}}')
+        with open(os.path.join(rd, "plot.png"), "wb") as fh:
+            fh.write(b"\x89PNG fake")
+    parch = ps.build_archive(pid, include_results=True)[0]
+    with zipfile.ZipFile(parch) as z:
+        pnames = z.namelist()
+        pmani = _json.loads(z.read("manifest.json"))
+        proot = ET.fromstring(z.read("manifest.xml"))
+    check("portable export bundles the referenced run folders",
+          "results/A/r1/outputs.json" in pnames and "results/A/r1/plot.png" in pnames
+          and "results/B/r2/outputs.json" in pnames)
+    check("manifest.json flags with_results + counts files",
+          pmani.get("with_results") is True and pmani.get("result_files") >= 4)
+    plocs = {c.get("location") for c in proot.iter(MNS + "content")}
+    check("OMEX manifest registers bundled results",
+          "./results/A/r1/outputs.json" in plocs)
+    # import into FRESH models + results roots -> run folders restored, node_state intact
+    fm, fr = tempfile.mkdtemp(), tempfile.mkdtemp()
+    pimp = ps.import_archive(parch, models_dir=fm, results_root=fr)
+    check("portable import restores run artifacts into a fresh results root",
+          os.path.exists(os.path.join(fr, "A", "r1", "outputs.json"))
+          and os.path.exists(os.path.join(fr, "B", "r2", "plot.png")))
+    check("portable import keeps node_state (references now resolve)",
+          pimp.get("node_state") == ns)
+    # never clobber an existing local run
+    keep = os.path.join(fr, "A", "r1", "outputs.json")
+    with open(keep, "w") as fh:
+        fh.write("LOCAL")
+    ps.import_archive(parch, models_dir=fm, results_root=fr)
+    with open(keep) as fh:
+        check("import does not clobber an existing local run", fh.read() == "LOCAL")
 
     # --- backward-compat: an OLD plain-zip archive (no manifest.xml) still imports ---
     fd, old_arch = tempfile.mkstemp(suffix=".fskxp")

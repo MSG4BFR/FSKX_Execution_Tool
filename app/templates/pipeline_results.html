@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pipeline results — {{ items|length }} node(s)</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <style>
+    .pr-node { border:1px solid var(--border); border-radius:12px; margin:0 0 16px; overflow:hidden; }
+    .pr-node[open] > .pr-head { border-bottom:1px solid var(--border); }
+    .pr-head { list-style:none; cursor:pointer; display:flex; align-items:center; gap:10px;
+      padding:12px 14px; background:var(--panel2); }
+    .pr-head::-webkit-details-marker { display:none; }
+    .pr-step { font-family:ui-monospace,monospace; font-size:12px; font-weight:700; color:#fff;
+      background:var(--accent2, #5b6cff); border-radius:6px; padding:2px 8px; flex:none; }
+    .pr-title { font-weight:600; }
+    .pr-when { color:var(--muted); font-size:12.5px; }
+    .pr-spring { flex:1; }
+    .pr-caret { color:var(--muted); transition:transform .15s; }
+    .pr-node[open] .pr-caret { transform:rotate(90deg); }
+    .pr-body { padding:14px 16px; }
+    .pr-toc { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:0 0 20px; }
+    .pr-chip { font-size:12.5px; color:var(--muted); border:1px solid var(--border);
+      border-radius:999px; padding:3px 10px; text-decoration:none; }
+    .pr-chip:hover { color:var(--text); border-color:var(--accent); }
+    .pr-tools { margin-left:auto; display:flex; gap:8px; }
+    .pr-cfg code { display:inline-block; margin:2px 6px 2px 0; }
+    .pr-from { color:var(--good); }
+    .pr-jtable { border-collapse:collapse; width:100%; font-size:13px; }
+    .pr-jtable th, .pr-jtable td { border:1px solid var(--border); padding:5px 9px; text-align:left; vertical-align:top; }
+    .pr-jtable th { color:var(--muted); font-weight:600; font-size:12px; }
+    .pr-tf { color:var(--muted); font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <a class="back" href="/join">← Back to join models</a>
+    <header class="top"><h1>Pipeline results</h1></header>
+    <p class="sub">Selected node runs, in execution order — final and intermediate results on one page.</p>
+
+    {% if not items %}
+      <p class="note">No runs were selected (or they could no longer be found). Go back, tick one or
+      more node results, and choose “View selected results”.</p>
+    {% else %}
+    <div class="pr-toc">
+      {% for it in items %}
+        <a class="pr-chip" href="#node-{{ loop.index }}">{{ loop.index }} · {{ it.name }}</a>
+      {% endfor %}
+      <span class="pr-tools">
+        <button class="btn secondary" type="button" onclick="prAll(true)">Expand all</button>
+        <button class="btn secondary" type="button" onclick="prAll(false)">Collapse all</button>
+      </span>
+    </div>
+
+    {% for it in items %}
+      {% set run = it.run %}
+      {% set fskx = it.fskx %}
+      <details class="pr-node" id="node-{{ loop.index }}" {% if loop.last %}open{% endif %}>
+        <summary class="pr-head">
+          <span class="pr-step">step {{ loop.index }}</span>
+          <span class="pr-title">{{ it.name }}</span>
+          <span class="badge {{ 'on' if run.ok else 'off' }}">{{ '✓ ok' if run.ok else '✗ failed' }}</span>
+          {% if run.scenario %}<span class="badge">{{ run.scenario }}</span>{% endif %}
+          {% if run.language %}<span class="badge lang-{{ run.language }}">{{ run.language|upper }}</span>{% endif %}
+          <span class="pr-when">{{ run.run_id[0:4] }}-{{ run.run_id[4:6] }}-{{ run.run_id[6:8] }}
+            {{ run.run_id[9:11] }}:{{ run.run_id[11:13] }}:{{ run.run_id[13:15] }}</span>
+          <span class="pr-spring"></span>
+          <span class="pr-caret">▶</span>
+        </summary>
+        <div class="pr-body">
+          {% if it.joined %}
+          <fieldset class="pr-inj">
+            <legend>Joined inputs (flowed in from upstream)</legend>
+            <table class="pr-jtable">
+              <tr><th>Input</th><th>Value</th><th>Source</th></tr>
+              {% for j in it.joined %}
+              <tr>
+                <td><code class="pr-from">{{ j.param }}</code></td>
+                <td><code>{{ j.value }}</code></td>
+                <td>
+                  {% if j.source and j.source.kind == 'node' %}
+                    ← step {{ j.source.step }} · {{ j.source.name }} · <code>{{ j.source.param }}</code>{% if j.source.transform %} <span class="pr-tf">({{ j.source.transform }})</span>{% endif %}
+                  {% elif j.source and j.source.kind == 'constant' %}
+                    <span class="note">shared constant</span>
+                  {% else %}
+                    <span class="note">upstream output</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </table>
+            <div class="note" style="margin-top:6px">These values came from an upstream node’s output and overrode the scenario/form values.</div>
+          </fieldset>
+          {% endif %}
+
+          <fieldset class="pr-cfg">
+            <legend>Configuration</legend>
+            <div class="note">
+              Scenario: <code>{{ run.scenario or '—' }}</code>
+            </div>
+            {% if run.params %}
+            <div class="note" style="margin-top:6px">Parameters:
+              {% for k, v in run.params.items() %}<code>{{ k }}={{ v }}</code>{% endfor %}
+            </div>
+            {% elif not run.has_meta %}
+            <div class="note" style="margin-top:6px">Parameters weren’t recorded for this run.</div>
+            {% endif %}
+          </fieldset>
+
+          {% if run.plots %}
+            {% if run.plots|length > 1 %}<p class="note">{{ run.plots|length }} plots:</p>{% endif %}
+            {% for p in run.plots %}
+              {% set url = '/runs/' + fskx + '/' + run.run_id + '/file/' + p %}
+              <figure class="plot-wrap">
+                {% if p.lower().endswith('.pdf') %}
+                  <embed type="application/pdf" class="plot plot-pdf" src="{{ url }}">
+                {% else %}
+                  <img class="plot" src="{{ url }}" alt="{{ p }}">
+                {% endif %}
+                <figcaption class="note"><a href="{{ url }}" download>{{ p }} ↓</a></figcaption>
+              </figure>
+            {% endfor %}
+          {% else %}
+            <p class="note">No plots were produced by this run.</p>
+          {% endif %}
+
+          {% if run.files %}
+          <div class="filelist">
+            <p class="note">Download outputs:</p>
+            {% for f in run.files %}
+              <a href="/runs/{{ fskx }}/{{ run.run_id }}/file/{{ f }}">{{ f }}</a>
+            {% endfor %}
+          </div>
+          {% endif %}
+
+          <p style="margin-top:14px">
+            <a class="btn secondary" href="/runs/{{ fskx }}/{{ run.run_id }}" target="_blank" rel="noopener">Open full run page ↗</a>
+          </p>
+        </div>
+      </details>
+    {% endfor %}
+
+    {% set fskx = '' %}
+    {% set chat_title = 'Talk to these results' %}
+    {% set chat_intro = 'Ask ' ~ ai_label ~ ' about the selected nodes and how values flow through the chain. It sees a compact, clipped summary of each node (config, joined inputs, and small samples of results) — not the full datasets — so for exact figures, open a node’s results above.' %}
+    {% include "_chat.html" %}
+    {% endif %}
+  </div>
+  <script>
+    function prAll(open){ document.querySelectorAll('details.pr-node').forEach(d=>{ d.open = open; }); }
+    {% if items %}
+    window.fskxChatEndpoint = "/api/pipeline-chat";
+    const PIPELINE_CHAT = {
+      items: {{ chat_items|tojson }},
+      wiring: {{ chat_wiring|tojson }}
+    };
+    window.fskxChatBody = (history) => ({
+      items: PIPELINE_CHAT.items,
+      wiring: PIPELINE_CHAT.wiring,
+      messages: history
+    });
+    {% endif %}
+  </script>
+</body>
+</html>

@@ -11,6 +11,7 @@ Also provides:
     models whose dependencies the standard build cannot satisfy.
 """
 
+import json
 import os
 import tempfile
 import threading
@@ -379,6 +380,133 @@ def compare_page(fskx):
                            api_key_set=_api_key_usable())
 
 
+def _node_directory(pipe):
+    """Map node-id -> {fskx, step, name} for a pipeline (step = 1-based topological order).
+    Model names are resolved once per fskx. Used to attribute joined inputs to their source."""
+    nodes = pipe.get("nodes") or []
+    try:
+        order = pipeline.topo_order(pipe)
+    except Exception:  # noqa: BLE001
+        order = [n.get("id") for n in nodes]
+    step_of = {nid: i + 1 for i, nid in enumerate(order)}
+    name_cache = {}
+    directory = {}
+    for n in nodes:
+        nid, fskx = n.get("id"), n.get("fskx")
+        if fskx not in name_cache:
+            try:
+                name_cache[fskx] = engine.model_info(fskx).get("name", fskx)
+            except Exception:  # noqa: BLE001
+                name_cache[fskx] = fskx
+        directory[nid] = {"fskx": fskx, "step": step_of.get(nid),
+                          "name": name_cache.get(fskx, fskx)}
+    return directory
+
+
+def _attribute_injected(node_id, run, pipe, directory):
+    """For each joined value injected into ``node_id``, say where it came from: a source node
+    (step + model + param, plus any transform) for an edge, or 'constant' for a shared value."""
+    injected = (run or {}).get("injected") or {}
+    edges = pipe.get("edges") or []
+    shared = pipe.get("shared") or []
+    rows = []
+    for param, value in injected.items():
+        src = None
+        for e in edges:
+            tgt = e.get("target") or {}
+            if tgt.get("node") == node_id and tgt.get("param") == param:
+                s = e.get("source") or {}
+                d = directory.get(s.get("node"), {})
+                src = {"kind": "node", "step": d.get("step"),
+                       "name": d.get("name") or s.get("node"),
+                       "param": s.get("param"),
+                       "transform": e.get("transform")}
+                break
+        if src is None:
+            for s in shared:
+                if any(t.get("node") == node_id and t.get("param") == param
+                       for t in (s.get("targets") or [])):
+                    src = {"kind": "constant"}
+                    break
+        rows.append({"param": param, "value": value, "source": src})
+    return rows
+
+
+@app.route("/pipeline-results", methods=["GET", "POST"])
+def pipeline_results_page():
+    """Assembled results for a selection of pipeline node runs — possibly different models —
+    shown in execution order: each node's plots, output files, the config it ran with
+    (scenario + params), and the joined values that flowed in from upstream **with source-node
+    attribution**. Unlike /compare (one model, param diff), this stacks heterogeneous results
+    on one page so a researcher can read the chain end-to-end.
+
+    POST carries a JSON ``payload`` ({items:[{fskx,run_id,node}], pipeline:{...}}) so joined
+    inputs can be attributed to their upstream node. GET accepts ``items=fskx~run_id,...`` for
+    a shareable link (value-level only, no source attribution)."""
+    if request.method == "POST":
+        payload = {}
+        try:
+            payload = json.loads(request.form.get("payload") or "{}")
+        except ValueError:
+            payload = {}
+        items_in = payload.get("items") or []
+        pipe = payload.get("pipeline") or {}
+    else:
+        pipe = {}
+        items_in = []
+        for tok in request.args.get("items", "").split(","):
+            tok = tok.strip()
+            if tok and "~" in tok:
+                fskx, run_id = tok.split("~", 1)
+                items_in.append({"fskx": fskx, "run_id": run_id, "node": None})
+
+    directory = _node_directory(pipe) if pipe else {}
+    items = []
+    for idx, it in enumerate(items_in, 1):
+        fskx, run_id = it.get("fskx"), it.get("run_id")
+        if fskx not in engine.list_models() or not run_id:
+            continue
+        run = next((r for r in engine.list_runs(fskx) if r["run_id"] == run_id), None)
+        if not run:
+            continue
+        node_id = it.get("node")
+        meta = directory.get(node_id, {})
+        name = meta.get("name") or _safe_model_name(fskx)
+        joined = _attribute_injected(node_id, run, pipe, directory) if pipe else [
+            {"param": k, "value": v, "source": None}
+            for k, v in (run.get("injected") or {}).items()]
+        items.append({"fskx": fskx, "name": name, "run": run,
+                      "step": meta.get("step") or idx, "joined": joined})
+
+    # chat context (compact): which runs + the wiring among them, in step terms (no result data)
+    chat_items = [{"fskx": it["fskx"], "run_id": it["run"]["run_id"],
+                   "step": it["step"], "name": it["name"]} for it in items]
+    chat_wiring = _chat_wiring(pipe, directory, {it["run"]["run_id"] for it in items}) if pipe else []
+    return render_template("pipeline_results.html", items=items,
+                           chat_items=chat_items, chat_wiring=chat_wiring,
+                           api_key_set=_api_key_usable())
+
+
+def _safe_model_name(fskx):
+    try:
+        return engine.model_info(fskx).get("name", fskx)
+    except Exception:  # noqa: BLE001
+        return fskx
+
+
+def _chat_wiring(pipe, directory, _run_ids):
+    """Compact wiring summary for the chat: source-step·param → target-step·param (+transform)."""
+    out = []
+    for e in (pipe.get("edges") or []):
+        s, t = e.get("source") or {}, e.get("target") or {}
+        sd, td = directory.get(s.get("node"), {}), directory.get(t.get("node"), {})
+        if sd.get("step") and td.get("step"):
+            out.append({"from_step": sd["step"], "from_param": s.get("param"),
+                        "to_step": td["step"], "to_param": t.get("param"),
+                        "transform": e.get("transform")})
+    return out
+
+
 @app.route("/runs/<path:fskx>/<run_id>")
 def run_view_page(fskx, run_id):
     """Result page for a single stored run (read from the persisted volume)."""
@@ -426,18 +554,30 @@ def join_page():
 
 @app.route("/api/model-params/<path:fskx>")
 def api_model_params(fskx):
-    """Declared parameters of one model, for populating the builder's port menus."""
+    """Declared parameters of one model, for populating the builder's port menus.
+
+    Also returns the model's `scenarios` (so each node can pick its base scenario) and the
+    `fields` for the selected scenario. Pass `?scenario=<name>` to re-derive the editable
+    fields for a non-default scenario (mirrors the run page's `/model-params`)."""
     if fskx not in engine.list_models():
         abort(404)
+    scenario = request.args.get("scenario")
     try:
         specs = engine.model_param_specs(fskx)
+        scenarios, selected = [], None
         try:
             info = engine.model_info(fskx)
             name, language, fields = info["name"], info["language"], info["fields"]
+            scenarios = info.get("scenarios", []) or []
+            selected = scenarios[0] if scenarios else None
+            if scenario and scenario in scenarios:
+                fields = engine.fields_for_scenario(fskx, scenario)
+                selected = scenario
         except Exception:  # noqa: BLE001
             name, language, fields = _join_label(fskx), "?", []
         return jsonify({"ok": True, "name": name, "language": language,
-                        "params": specs, "fields": fields})
+                        "params": specs, "fields": fields,
+                        "scenarios": scenarios, "selected_scenario": selected})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"ok": False, "error": str(exc)})
 
@@ -670,11 +810,21 @@ def api_pipelines_list():
 
 @app.route("/api/pipelines", methods=["POST"])
 def api_pipelines_save():
+    """Save a named pipeline. Phase C: snapshot the workflow's *live* node-state (read from the
+    side file keyed by the request's ``workflow_id``) into the saved record, and migrate that
+    state onto the new pipeline id — so saving a draft no longer abandons its execution state
+    under the old draft key, and an exported ``.fskxp`` carries the cached-run identity."""
     d = request.get_json(force=True, silent=True) or {}
     p = d.get("pipeline") or {}
     if not p.get("nodes"):
         return jsonify({"error": "Nothing to save — add at least one node."}), 400
-    rec = pipeline_store.save(p, d.get("name"), d.get("id"))
+    wid = d.get("workflow_id")
+    state = workflow_state.load(wid) if wid else {}
+    rec = pipeline_store.save(p, d.get("name"), d.get("id"), node_state=state)
+    # Migrate the live side-file to the saved id so caching keeps working after a draft is
+    # promoted (the client's workflow_id becomes the pipeline id on the next request).
+    if state and rec["id"] != wid:
+        workflow_state.save(rec["id"], state)
     return jsonify({"id": rec["id"], "name": rec["name"], "modified": rec["modified"]})
 
 
@@ -693,7 +843,23 @@ def api_pipelines_delete(pid):
 
 @app.route("/api/pipelines/<pid>/export")
 def api_pipelines_export(pid):
-    res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR)
+    """Export a saved pipeline as a ``.fskxp`` archive. ``?results=1`` produces the *portable*
+    archive that also bundles the executed nodes' result artifacts (larger, but opens elsewhere
+    with results viewable and nodes clean — no re-run)."""
+    with_results = request.args.get("results") in ("1", "true", "yes")
+    # Sync the saved record's node-state from the *live* working state (keyed by the pipeline id)
+    # so an export always reflects what's currently executed on the canvas — no need to Save
+    # after running. Best-effort: a read/write hiccup just falls back to the stored state.
+    try:
+        live = workflow_state.load(pid)
+        rec = pipeline_store.load(pid)
+        if rec is not None and live and rec.get("node_state") != live:
+            pipeline_store.save(rec.get("pipeline", {}), rec.get("name"), pid, node_state=live)
+    except Exception:  # noqa: BLE001
+        pass
+    res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR,
+                                       include_results=with_results,
+                                       results_root=engine.RESULTS_ROOT)
     if not res:
         abort(404)
     tmp, name = res
@@ -711,7 +877,8 @@ def api_pipelines_import():
     os.close(fd)
     f.save(tmp)
     try:
-        rec = pipeline_store.import_archive(tmp, models_dir=engine.MODELS_DIR)
+        rec = pipeline_store.import_archive(tmp, models_dir=engine.MODELS_DIR,
+                                            results_root=engine.RESULTS_ROOT)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"Could not import: {exc}"}), 400
     finally:
@@ -936,6 +1103,35 @@ def api_chat():
         return jsonify({"error": "No message to send."}), 400
     try:
         reply = engine.chat_about_model(fskx, messages, _cfg(), run_ids=run_ids)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"reply": reply})
+
+
+@app.route("/api/pipeline-chat", methods=["POST"])
+def api_pipeline_chat():
+    """Chat grounded on a SELECTION of pipeline node runs (possibly different models). The
+    context is deliberately compact — per-node config, joined inputs, and small clipped result
+    samples, no paper PDFs and a tight total budget — so we never dump full datasets to the LLM."""
+    data = request.get_json(force=True, silent=True) or {}
+    raw_items = data.get("items") or []
+    wiring = data.get("wiring") or []
+    messages = data.get("messages") or []
+    if not _api_key_usable():
+        return jsonify({"error": SETTINGS.get("api_key_status")
+                        or "No usable AI backend. Configure one under Settings."}), 400
+    if not messages:
+        return jsonify({"error": "No message to send."}), 400
+    items = []
+    for it in raw_items:
+        fskx, run_id = it.get("fskx"), it.get("run_id")
+        if fskx in engine.list_models() and run_id:
+            items.append({"fskx": fskx, "run_id": run_id,
+                          "step": it.get("step"), "name": it.get("name")})
+    if not items:
+        return jsonify({"error": "No valid node runs were selected."}), 400
+    try:
+        reply = engine.chat_about_pipeline(items, messages, _cfg(), wiring=wiring)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 500
     return jsonify({"reply": reply})

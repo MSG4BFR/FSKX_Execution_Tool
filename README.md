@@ -86,6 +86,19 @@ models, then **Validate** and **Run** the whole chain. While it runs, each box l
 (running → done, or red on failure, with downstream boxes shown as blocked) and you can open any
 node's results.
 
+Each box shows its model name clearly (toggle **Label: Header/Below** in the canvas toolbar to
+switch between an in-box title and a KNIME-style name beneath the node), and **Auto-layout**
+spaces nodes by their real height so tall ones don't overlap. If a model defines more than one
+simulation scenario, pick one **per node** from the dropdown on the box — so the same model can
+appear several times, each under a different scenario.
+
+**See results across the chain.** In the run-results list, tick any nodes — even different models
+— and click **View selected results** to open one page that stacks their plots, output files,
+configuration, and **joined inputs traced back to their source node** (`input ← step N · model ·
+param`), in execution order. That page also has an AI chat scoped to just those nodes (it's given
+a compact, clipped summary of each — not the full datasets). The older **Compare** button stays
+for the narrower case of diffing several runs of the *same* model.
+
 The workflow remembers what each node has already computed, so it works incrementally — like a
 small no-code workflow tool:
 
