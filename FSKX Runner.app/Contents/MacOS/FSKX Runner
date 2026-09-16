@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+osascript <<OSA
+tell application "Terminal"
+    activate
+    do script "cd \"$DIR\" && ./run.sh"
+end tell
+OSA

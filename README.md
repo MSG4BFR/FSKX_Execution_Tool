@@ -23,15 +23,25 @@ the **AI environment** builder and the **Talk to your model** chat (see below).
 
 ## How to start it
 
-**macOS / Linux**
+**Windows**
+
+Double-click **`FSKX Runner.exe`** (the icon with the RAKIP mark). Since it isn't
+code-signed, Windows SmartScreen may show "Windows protected your PC" the first time —
+click **More info → Run anyway**.
+
+**macOS**
+
+Double-click **`FSKX Runner.app`** (the icon with the RAKIP mark). The first time, you'll
+need to right-click it and choose **Open** once (macOS blocks unsigned apps from launching
+by a plain double-click) — after that, double-clicking works normally.
+
+**Linux**, or the command line on any platform:
 
 ```bash
 ./run.sh
 ```
 
-**Windows**
-
-Double-click `run.bat` (or run it from a command prompt).
+(Windows equivalent: `run.bat`.)
 
 The first launch builds the tool's Docker image, which takes a minute or two. After that
 your browser opens automatically at http://localhost:8000 . To stop the tool, press

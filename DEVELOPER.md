@@ -522,3 +522,29 @@ These are real issues from building the tool. Keep them in mind before "simplify
 - Quick checks worth keeping: `python -m py_compile` on all modules; `depresolve.resolve`
   on a model; `aienv.gather_context` to inspect the assembled prompt; `aienv.matched_recipes`
   for recipe triggering.
+
+### TODO: verify `FSKX Runner.app` on macOS
+
+`FSKX Runner.app` (repo root) is a pre-built, hand-assembled app bundle — built and
+tested from Windows, never actually launched on a Mac. Needs a real check:
+
+- [ ] **Gatekeeper**: fresh clone/download, first launch. Confirm a plain double-click is
+  blocked and right-click → **Open** lets it through (per the README's macOS note); if
+  macOS refuses it outright ("damaged/can't be opened"), the app needs ad-hoc signing
+  (`codesign --force --deep --sign - "FSKX Runner.app"`) or the quarantine flag needs
+  stripping (`xattr -cr "FSKX Runner.app"`) as a documented workaround.
+- [ ] **Icon rendering**: confirm Finder shows the RAKIP icon (`Contents/Resources/icon.icns`)
+  correctly at multiple sizes (Dock, list view, Get Info) — it was hand-encoded (see
+  `assets/icon/icon.icns` and the encoder that built it, since `iconutil` isn't available
+  outside macOS) and only structurally validated (chunk headers/PNG signatures parsed back
+  correctly), never rendered by real Finder/Icon Services.
+- [ ] **Launch behavior**: confirm `Contents/MacOS/FSKX Runner` (a bash script invoking
+  `osascript` to open Terminal and run `./run.sh`) actually opens Terminal, `cd`s to the
+  right directory, and runs the tool — including when the whole folder has been renamed or
+  moved (the script derives its path via `dirname "$0"`, untested on real macOS).
+- [ ] Confirm the executable bit survived however the app is distributed to the user
+  (git clone preserves it; a zip/re-zip round-trip might not — re-`chmod +x` if needed).
+
+If any of this needs fixing, the source assets to regenerate from are
+`assets/icon/logo_source.png` (original RAKIP logo) → `assets/icon/iconset/` (per-size
+PNGs) → `assets/icon/icon.icns`.
