@@ -25,6 +25,7 @@ Pure stdlib; no Flask/engine import, so it is unit-testable in isolation.
 """
 
 import json
+import stat
 import os
 import shutil
 import tempfile
@@ -206,7 +207,19 @@ def delete(pid):
 # ---------------------------------------------------------------------------
 
 def member_models(record):
-    return sorted({n["fskx"] for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")})
+    members = {n["fskx"] for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")}
+    for name in members:
+        if (not isinstance(name, str) or not 5 < len(name) <= 255 or not name.lower().endswith('.fskx')
+                or any(c in name for c in '/\\:\x00') or any(ord(c) < 32 for c in name)):
+            raise ValueError("Pipeline model references must be bare FSKX filenames")
+    return sorted(members)
+
+
+def _contained(root, path):
+    root = os.path.realpath(root)
+    if os.path.commonpath([root, os.path.realpath(path)]) != root or os.path.islink(path):
+        raise ValueError("Pipeline archive path escapes its configured directory")
+    return path
 
 
 def _node_runs(record):
@@ -219,12 +232,18 @@ def _node_runs(record):
         rid, fskx = s.get("run_id"), fskx_of.get(nid)
         if not (rid and fskx):
             continue
+        if not pipeline_safe_run_id(rid):
+            raise ValueError("Invalid pipeline result reference")
         base = os.path.splitext(fskx)[0]
         if (base, rid) in seen:
             continue
         seen.add((base, rid))
         out.append((base, rid))
     return out
+
+
+def pipeline_safe_run_id(rid):
+    return isinstance(rid, str) and len(rid) <= 128 and safe_id(rid) and ':' not in rid
 
 
 def build_archive(pid, models_dir=None, include_results=False, results_root=None):
@@ -251,7 +270,7 @@ def build_archive(pid, models_dir=None, include_results=False, results_root=None
     with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(PIPELINE_JSON, json.dumps(record, indent=2))
         for f in members:
-            src = os.path.join(models_dir, f)
+            src = _contained(models_dir, os.path.join(models_dir, f))
             if os.path.exists(src):
                 z.write(src, "models/" + f)
                 embedded.append("./models/" + f)
@@ -259,12 +278,12 @@ def build_archive(pid, models_dir=None, include_results=False, results_root=None
                 missing.append(f)
         if include_results:
             for base, rid in _node_runs(record):
-                run_path = os.path.join(results_root, base, rid)
+                run_path = _contained(results_root, os.path.join(results_root, base, rid))
                 if not os.path.isdir(run_path):
                     continue
                 for dirpath, _dirs, fnames in os.walk(run_path):
                     for fn in fnames:
-                        ap = os.path.join(dirpath, fn)
+                        ap = _contained(results_root, os.path.join(dirpath, fn))
                         rel = os.path.relpath(ap, results_root).replace(os.sep, "/")
                         arc = "results/" + rel
                         z.write(ap, arc)
@@ -301,8 +320,10 @@ def _master_location(z):
 
 def _safe_rel(prefix, name):
     """The path under ``prefix`` for a zip entry, or None if it escapes (traversal/absolute)."""
-    rel = name[len(prefix):]
+    rel = name[len(prefix):].replace('\\', '/')
     if not rel or rel.endswith("/"):
+        return None
+    if ':' in rel or '\x00' in rel or '..' in rel.split('/'):
         return None
     norm = os.path.normpath(rel)
     if os.path.isabs(norm) or norm.startswith(".." + os.sep) or norm == "..":
@@ -324,17 +345,25 @@ def import_archive(path, models_dir=None, results_root=None):
     results_root = results_root or RESULTS_ROOT
     os.makedirs(models_dir, exist_ok=True)
     with zipfile.ZipFile(path) as z:
+        entries = z.infolist()
+        if (len(entries) > 4096 or len({e.filename for e in entries}) != len(entries)
+                or sum(e.file_size for e in entries) > 256*1024*1024
+                or any(e.file_size > 64*1024*1024 or stat.S_ISLNK(e.external_attr >> 16) for e in entries)):
+            raise ValueError("Pipeline archive exceeds limits or contains duplicate/link entries")
         master = _master_location(z)
         names = set(z.namelist())
         if not (master and master in names):
             master = PIPELINE_JSON
+        if z.getinfo(master).file_size > 1024*1024:
+            raise ValueError("Pipeline definition exceeds 1 MiB")
         record = json.loads(z.read(master).decode("utf-8"))
+        member_models(record)  # Validate references before restoring any files.
         for n in z.namelist():
             if n.startswith("models/") and n.endswith(".fskx"):
                 base = os.path.basename(n)
                 if not base or base != n[len("models/"):]:  # reject nested / traversal
                     continue
-                target = os.path.join(models_dir, base)
+                target = _contained(models_dir, os.path.join(models_dir, base))
                 if not os.path.exists(target):
                     with z.open(n) as src, open(target, "wb") as dst:
                         shutil.copyfileobj(src, dst)
@@ -342,7 +371,7 @@ def import_archive(path, models_dir=None, results_root=None):
                 rel = _safe_rel("results/", n)
                 if not rel:
                     continue
-                target = os.path.join(results_root, rel)
+                target = _contained(results_root, os.path.join(results_root, rel))
                 if os.path.exists(target):       # never clobber a local run's artifacts
                     continue
                 os.makedirs(os.path.dirname(target), exist_ok=True)
