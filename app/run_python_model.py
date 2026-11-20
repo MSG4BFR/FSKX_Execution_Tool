@@ -123,6 +123,52 @@ def _fmt_exc(exc):
     return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 
 
+saved_figures = []
+figure_failures = []
+
+
+def _save_figure(figure, number=0):
+    # Keep object references: pyplot can reuse number 1 after the first figure closes.
+    if any(previous is figure for previous in saved_figures):
+        return
+    if len(saved_figures) >= 64:
+        if "Figure capture limit (64) reached" not in status["warnings"]:
+            status["warnings"].append("Figure capture limit (64) reached")
+        return
+    filename = "plot_{}.png".format(len(saved_figures) + 1)
+    try:
+        figure.savefig(os.path.join(outdir, filename), dpi=120, bbox_inches="tight")
+        status["plots"].append(filename)
+        saved_figures.append(figure)
+    except Exception as exc:
+        figure_failures.append("figure {} save failed: {}".format(number, exc))
+
+
+if have_mpl:
+    from matplotlib._pylab_helpers import Gcf
+    original_close = plt.close
+
+    def _close_with_capture(figure=None):
+        managers = Gcf.get_all_fig_managers()
+        if isinstance(figure, str) and figure == "all":
+            selected = managers
+        elif figure is None:
+            active = Gcf.get_active()
+            selected = [active] if active is not None else []
+        elif hasattr(figure, "savefig"):
+            selected = [manager for manager in managers if manager.canvas.figure is figure]
+            if not selected:
+                _save_figure(figure, getattr(figure, "number", 0))
+        else:
+            selected = [manager for manager in managers if manager.num == figure
+                        or (isinstance(figure, str) and manager.canvas.figure.get_label() == figure)]
+        for manager in selected:
+            _save_figure(manager.canvas.figure, manager.num)
+        return original_close(figure)
+
+    plt.close = _close_with_capture
+
+
 # Params + model are the core: a failure here is fatal.
 try:
     run_script(PARAM_SCRIPT)       # generated parameter overrides
@@ -142,16 +188,13 @@ if status["ok"] and VIZ_SCRIPT:
             "produced):\n" + _fmt_exc(exc)
         )
 
-# Save every figure that exists, regardless of whether visualization finished.
+# Capture open figures using the same path as explicit pyplot.close calls.
 if have_mpl:
-    for i, num in enumerate(plt.get_fignums(), start=1):
-        fname = f"plot_{i}.png"
-        try:
-            plt.figure(num).savefig(os.path.join(outdir, fname),
-                                    dpi=120, bbox_inches="tight")
-            status["plots"].append(fname)
-        except Exception as exc:  # noqa: BLE001
-            status["stdout_note"] += f"figure {num} save failed: {exc}\n"
+    for manager in Gcf.get_all_fig_managers():
+        _save_figure(manager.canvas.figure, manager.num)
+if figure_failures:
+    status["stdout_note"] += "\n".join(figure_failures)
+    status["warnings"].extend(figure_failures)
 
 # Collect output files the model created or overwrote during the run (e.g. CSVs, and
 # images/files written into subfolders), preserving their relative paths under outdir.
@@ -164,6 +207,10 @@ for rel, src in _walk_rel(workdir):
         if prev is not None and os.path.getmtime(src) == prev:
             continue  # untouched input file
         dest = os.path.join(outdir, rel)
+        if rel in status["plots"] and os.path.isfile(dest):
+            # Preserve the figure and an explicit model-written image with its name.
+            rel = "model-files/" + rel
+            dest = os.path.join(outdir, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy2(src, dest)
         status["files"].append(rel)
