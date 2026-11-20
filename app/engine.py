@@ -358,7 +358,8 @@ def _sync_runners():
     os.makedirs(RUNNER_DIR, exist_ok=True)
     # The interchange modules ride along so the wrappers can `import interchange` /
     # `source("interchange.R")` from the same directory in the sibling container.
-    for fn in ("run_python_model.py", "run_r_model.R", "interchange.py", "interchange.R"):
+    for fn in ("run_python_model.py", "run_r_model.R", "interchange.py", "interchange.R",
+               "interchange_snapshot.py", "interchange_snapshot.R"):
         try:
             shutil.copy2(os.path.join(APP_DIR, fn), os.path.join(RUNNER_DIR, fn))
         except OSError:
