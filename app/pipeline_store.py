@@ -331,7 +331,72 @@ def _safe_rel(prefix, name):
     return norm
 
 
-def import_archive(path, models_dir=None, results_root=None):
+class ArchiveConflictError(ValueError):
+    """An opt-in rejecting import found different local model/result contents."""
+
+    def __init__(self, paths):
+        self.paths = sorted(set(paths))
+        summary = ", ".join(self.paths[:5])
+        if len(self.paths) > 5:
+            summary += " (and {} more)".format(len(self.paths) - 5)
+        super().__init__("Import rejected: existing local files conflict with the archive: "
+                         + summary + ". Use another destination or resolve the conflicts first.")
+
+
+def _import_targets(archive, models_dir, results_root):
+    """Use the same entry selection and containment rules for preflight and copying."""
+    for entry in archive.infolist():
+        if entry.is_dir():
+            continue
+        name = entry.filename
+        if name.startswith("models/") and name.endswith(".fskx"):
+            base = os.path.basename(name)
+            if base and base == name[len("models/"):]:
+                yield entry, _contained(models_dir, os.path.join(models_dir, base))
+        elif name.startswith("results/"):
+            relative = _safe_rel("results/", name)
+            if relative:
+                yield entry, _contained(results_root, os.path.join(results_root, relative))
+
+
+def _same_contents(archive, entry, target):
+    if not os.path.isfile(target) or os.path.getsize(target) != entry.file_size:
+        return False
+    with archive.open(entry) as incoming, open(target, "rb") as local:
+        while True:
+            block = incoming.read(64 * 1024)
+            if block != local.read(64 * 1024):
+                return False
+            if not block:
+                return True
+
+
+def _check_import_conflicts(archive, targets):
+    conflicts, destinations = [], set()
+    for entry, target in targets:
+        key = os.path.normcase(os.path.realpath(target))
+        if key in destinations:
+            raise ValueError("Multiple archive entries resolve to the same import target: "
+                             + entry.filename)
+        destinations.add(key)
+        if os.path.exists(target):
+            if not _same_contents(archive, entry, target):
+                conflicts.append(entry.filename)
+        else:
+            # A file in place of a required parent directory also blocks this import.
+            parent = os.path.dirname(target)
+            while parent and not os.path.exists(parent):
+                ancestor = os.path.dirname(parent)
+                if ancestor == parent:
+                    break
+                parent = ancestor
+            if parent and not os.path.isdir(parent):
+                conflicts.append(entry.filename)
+    if conflicts:
+        raise ArchiveConflictError(conflicts)
+
+
+def import_archive(path, models_dir=None, results_root=None, *, conflict_policy="keep_local"):
     """Read a ``.fskxp`` archive: restore any member ``.fskx`` not already present, then save
     the pipeline as a NEW record (fresh id). Returns the saved record. Reads the OMEX
     ``manifest.xml`` to locate the master pipeline record when present, falling back to
@@ -340,10 +405,17 @@ def import_archive(path, models_dir=None, results_root=None):
     If the archive carries bundled run artifacts (``results/<base>/<run_id>/…`` — a *portable*
     export), they are restored into ``results_root`` so the saved node-state references resolve:
     the nodes recompute to *clean* and their results are viewable without re-running. Existing
-    local runs are never clobbered (an identical run id already present wins)."""
+    local files are never clobbered. ``conflict_policy="keep_local"`` (the default)
+    skips existing files even if their contents differ and still saves the new pipeline.
+    Opt in with ``conflict_policy="reject"`` to compare existing model/result files
+    byte-for-byte before copying anything. Identical files are accepted; differences
+    raise ``ArchiveConflictError`` with archive-relative ``paths``, without restoring
+    files or saving a pipeline. This preflight is not a transaction or a filesystem
+    lock: later I/O failures and concurrent changes are not rolled back."""
+    if not isinstance(conflict_policy, str) or conflict_policy not in ("keep_local", "reject"):
+        raise ValueError("conflict_policy must be 'keep_local' or 'reject'")
     models_dir = models_dir or MODELS_DIR
     results_root = results_root or RESULTS_ROOT
-    os.makedirs(models_dir, exist_ok=True)
     with zipfile.ZipFile(path) as z:
         entries = z.infolist()
         if (len(entries) > 4096 or len({e.filename for e in entries}) != len(entries)
@@ -358,25 +430,17 @@ def import_archive(path, models_dir=None, results_root=None):
             raise ValueError("Pipeline definition exceeds 1 MiB")
         record = json.loads(z.read(master).decode("utf-8"))
         member_models(record)  # Validate references before restoring any files.
-        for n in z.namelist():
-            if n.startswith("models/") and n.endswith(".fskx"):
-                base = os.path.basename(n)
-                if not base or base != n[len("models/"):]:  # reject nested / traversal
-                    continue
-                target = _contained(models_dir, os.path.join(models_dir, base))
-                if not os.path.exists(target):
-                    with z.open(n) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-            elif n.startswith("results/"):
-                rel = _safe_rel("results/", n)
-                if not rel:
-                    continue
-                target = _contained(results_root, os.path.join(results_root, rel))
-                if os.path.exists(target):       # never clobber a local run's artifacts
-                    continue
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with z.open(n) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+        targets = _import_targets(z, models_dir, results_root)
+        if conflict_policy == "reject":
+            targets = list(targets)
+            _check_import_conflicts(z, targets)
+        os.makedirs(models_dir, exist_ok=True)
+        for entry, target in targets:
+            if os.path.exists(target):       # never clobber a local model or result
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(entry) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
     # Carry the embedded node-state (Phase C) into the new record. With a portable archive the
     # restored run folders make these references resolve → nodes show clean. Without results,
     # the missing runs degrade safely to "stale" and re-run (HANDOFF §2 "when in doubt, stale").
