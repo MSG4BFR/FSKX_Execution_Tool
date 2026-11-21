@@ -22,6 +22,7 @@ import zipfile
 import depresolve
 import omex
 import state
+from plot_preferences import preferred_plot_exports
 
 # Directory layout (overridable via env for the container).
 # Image/document formats we display inline after a run (everything else is download-only).
@@ -442,7 +443,10 @@ def classify_outputs(outdir):
     models may write outputs anywhere under the work dir (e.g. a `visualizations/`
     folder), not just at the root. Paths are returned relative to `outdir` (posix).
 
-    `plots` are every displayable image a run produced — the device-captured
+    `plots` are displayable images, with hash-verified model exports preferred
+    over their automatic copies. Captures replaced in the preview remain in
+    `files` as downloads. Without a verified receipt all images remain visible.
+    Other images a run produced are retained — the device-captured
     plot_NNN.png AND any image files the model wrote itself (svg/pdf/jpg/…), with the
     device captures first and the rest alphabetical. `files` is everything else
     (download-only), excluding the internal status.json at the root.
@@ -455,11 +459,13 @@ def classify_outputs(outdir):
         for fn in sorted(fnames):
             rel = os.path.relpath(os.path.join(root, fn), outdir).replace(os.sep, "/")
             rels.append(rel)
+    preferred = preferred_plot_exports(outdir)
     plots = sorted(
-        (r for r in rels if r.lower().endswith(IMAGE_EXTS)),
+        (r for r in rels if r.lower().endswith(IMAGE_EXTS) and r not in preferred),
         key=lambda n: (not os.path.basename(n).lower().startswith("plot_"), n.lower()),
     )
-    files = [r for r in rels if not r.lower().endswith(IMAGE_EXTS) and r != "status.json"]
+    files = [r for r in rels if (not r.lower().endswith(IMAGE_EXTS) or r in preferred)
+             and r != "status.json"]
     return plots, files
 
 

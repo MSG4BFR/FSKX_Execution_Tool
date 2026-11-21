@@ -12,6 +12,7 @@ Usage: python run_python_model.py <workdir> <outdir>
 """
 
 import json
+import hashlib
 import os
 import sys
 
@@ -125,28 +126,152 @@ def _fmt_exc(exc):
 
 saved_figures = []
 figure_failures = []
+figure_states = []
+figure_exports = []
+figure_captures = []
+capturing_figures = []
+collected_paths = {}
+IMAGE_EXTS = ('.png', '.svg', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf')
+
+
+def _inside(path, root):
+    path, root = os.path.abspath(path), os.path.abspath(root)
+    if not path.startswith(root + os.sep):
+        return False
+    current = root
+    for part in os.path.relpath(path, root).split(os.sep):
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            return False
+    return os.path.realpath(path).startswith(os.path.realpath(root) + os.sep)
+
+
+def _image_hash(path):
+    if (not os.path.isfile(path) or os.path.islink(path)
+            or not 0 < os.path.getsize(path) <= 64 * 1024 * 1024):
+        return None
+    digest, size = hashlib.sha256(), 0
+    with open(path, 'rb') as stream:
+        while True:
+            block = stream.read(1024 * 1024)
+            if not block:
+                return digest.hexdigest()
+            size += len(block)
+            if size > 64 * 1024 * 1024:
+                return None
+            digest.update(block)
+
+
+def _figure_state(figure):
+    for state in figure_states:
+        if state['figure'] is figure:
+            return state
+    state = {'figure': figure, 'revision': 0, 'saving': 0, 'monitored': False}
+    if len(figure_states) >= 64:
+        return state
+    figure_states.append(state)
+    if hasattr(figure, 'stale_callback'):
+        previous = figure.stale_callback
+
+        def changed(artist, value):
+            if value and not state['saving']:
+                state['revision'] += 1
+            if previous is not None:
+                previous(artist, value)
+
+        try:
+            figure.stale_callback = changed
+            state.update(monitored=True, callback=changed)
+        except Exception:
+            pass
+    return state
+
+
+def _record_export(figure, destination, options, state):
+    if not state['monitored'] or len(figure_exports) >= 256:
+        return
+    if not isinstance(destination, (str, bytes)):
+        method = getattr(destination, '__fspath__', None)
+        if not callable(method):
+            return  # File-like streams do not prove a collectible export exists.
+        destination = method()
+    destination = os.fsdecode(destination)
+    extension = os.path.splitext(destination)[1].lower()
+    if not extension and options.get('format') is None:
+        destination += '.' + str(matplotlib.rcParams['savefig.format'])
+        extension = os.path.splitext(destination)[1].lower()
+    expected = str(options.get('format') or extension.lstrip('.')).lower()
+    if expected == 'jpg': expected = 'jpeg'
+    actual = extension.lstrip('.')
+    if actual == 'jpg': actual = 'jpeg'
+    path = os.path.abspath(destination)
+    if (extension not in IMAGE_EXTS or actual != expected
+            or not (_inside(path, workdir) or _inside(path, outdir))):
+        return
+    digest = _image_hash(path)
+    if digest:
+        figure_exports.append({'figure': figure, 'path': path, 'sha256': digest,
+                               'revision': state['revision']})
 
 
 def _save_figure(figure, number=0):
     # Keep object references: pyplot can reuse number 1 after the first figure closes.
-    if any(previous is figure for previous in saved_figures):
+    if any(previous is figure for previous in saved_figures + capturing_figures):
         return
     if len(saved_figures) >= 64:
         if "Figure capture limit (64) reached" not in status["warnings"]:
             status["warnings"].append("Figure capture limit (64) reached")
         return
-    filename = "plot_{}.png".format(len(saved_figures) + 1)
+    # A private capture directory avoids collisions with model-authored plot_N.png.
+    directory = os.path.join(outdir, 'automatic')
+    index = len(saved_figures) + 1
+    filename = 'automatic/plot_{}.png'.format(index)
+    while os.path.exists(os.path.join(outdir, filename)):
+        index += 1
+        filename = 'automatic/plot_{}.png'.format(index)
+    state = _figure_state(figure)
+    revision = state['revision']
+    tracked = state['monitored'] and getattr(figure, 'stale_callback', None) is state.get('callback')
+    capturing_figures.append(figure)
     try:
-        figure.savefig(os.path.join(outdir, filename), dpi=120, bbox_inches="tight")
+        state['saving'] += 1
+        if not _inside(os.path.join(outdir, filename), outdir):
+            raise ValueError('Unsafe automatic plot path')
+        os.makedirs(directory, exist_ok=True)
+        original_savefig(figure, os.path.join(outdir, filename), dpi=120, bbox_inches="tight")
         status["plots"].append(filename)
         saved_figures.append(figure)
+        figure_captures.append({'figure': figure, 'filename': filename,
+                                'revision': revision, 'tracked': tracked})
     except Exception as exc:
-        figure_failures.append("figure {} save failed: {}".format(number, exc))
+        figure_failures.append({'figure': figure, 'revision': revision, 'tracked': tracked,
+                                'message': "figure {} save failed: {}".format(number, exc)})
+    finally:
+        state['saving'] -= 1
+        capturing_figures.remove(figure)
 
 
 if have_mpl:
     from matplotlib._pylab_helpers import Gcf
+    from matplotlib.figure import Figure
+    original_savefig = Figure.savefig
     original_close = plt.close
+
+    def _save_with_export_record(figure, *args, **kwargs):
+        destination = args[0] if args else kwargs.get('fname')
+        state = _figure_state(figure)
+        state['saving'] += 1
+        try:
+            result = original_savefig(figure, *args, **kwargs)
+        finally:
+            state['saving'] -= 1
+        try:
+            _record_export(figure, destination, kwargs, state)
+        except Exception:
+            pass  # Export bookkeeping must not turn a successful model save into failure.
+        return result
+
+    Figure.savefig = _save_with_export_record
 
     def _close_with_capture(figure=None):
         managers = Gcf.get_all_fig_managers()
@@ -192,9 +317,6 @@ if status["ok"] and VIZ_SCRIPT:
 if have_mpl:
     for manager in Gcf.get_all_fig_managers():
         _save_figure(manager.canvas.figure, manager.num)
-if figure_failures:
-    status["stdout_note"] += "\n".join(figure_failures)
-    status["warnings"].extend(figure_failures)
 
 # Collect output files the model created or overwrote during the run (e.g. CSVs, and
 # images/files written into subfolders), preserving their relative paths under outdir.
@@ -204,18 +326,78 @@ for rel, src in _walk_rel(workdir):
         continue
     try:
         prev = before_mtimes.get(rel)
-        if prev is not None and os.path.getmtime(src) == prev:
+        tracked_export = any(item['path'] == os.path.abspath(src) for item in figure_exports)
+        if prev is not None and os.path.getmtime(src) == prev and not tracked_export:
             continue  # untouched input file
         dest = os.path.join(outdir, rel)
-        if rel in status["plots"] and os.path.isfile(dest):
-            # Preserve the figure and an explicit model-written image with its name.
+        if rel == "plot-selection.json" or (rel in status["plots"] and os.path.isfile(dest)):
+            # Preserve both the captured figure and an explicit model-written image.
             rel = "model-files/" + rel
             dest = os.path.join(outdir, rel)
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.copy2(src, dest)
+        collected_paths[os.path.abspath(src)] = rel
         status["files"].append(rel)
+        if rel.lower().endswith((".png", ".svg", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".pdf")) and rel not in status["plots"]:
+            status["plots"].append(rel)
     except Exception:
         pass
+
+# Keep captures as evidence, but prefer a verified model export of the SAME
+# figure revision for presentation. Check after collection, so overwritten or
+# deleted exports cannot accidentally suppress the remaining fallback.
+selection = {'schema_version': 1, 'preference': 'model_export', 'pairs': []}
+
+
+def _usable_export(capture):
+    if not capture['tracked']:
+        return None
+    for exported in reversed(figure_exports):
+        if exported['figure'] is not capture['figure'] or exported['revision'] != capture['revision']:
+            continue
+        relative = collected_paths.get(exported['path'])
+        if relative is None and _inside(exported['path'], outdir):
+            relative = os.path.relpath(exported['path'], outdir).replace(os.sep, '/')
+        if not relative or relative == capture.get('filename'):
+            continue
+        path = os.path.join(outdir, relative)
+        try:
+            if not _inside(path, outdir) or _image_hash(path) != exported['sha256']:
+                continue
+        except OSError:
+            continue
+        return exported, relative
+    return None
+
+
+for capture in figure_captures:
+    automatic = capture['filename']
+    usable = _usable_export(capture)
+    if usable:
+        exported, relative = usable
+        try:
+            automatic_hash = _image_hash(os.path.join(outdir, automatic))
+        except OSError:
+            automatic_hash = None
+        if not automatic_hash:
+            continue
+        selection['pairs'].append({'automatic': automatic, 'export': relative,
+            'automatic_sha256': automatic_hash, 'export_sha256': exported['sha256']})
+        status['plots'] = [name for name in status['plots'] if name != automatic]
+        if relative not in status['plots']: status['plots'].append(relative)
+        if automatic not in status['files']: status['files'].append(automatic)
+for failure in figure_failures:
+    status['stdout_note'] += failure['message'] + '\n'
+    usable = _usable_export(failure)
+    if usable:
+        relative = usable[1]
+        if relative not in status['plots']: status['plots'].append(relative)
+        status['warnings'].append('Automatic plot backup unavailable; retained the verified model export.')
+    else:
+        status['warnings'].append(failure['message'])
+with open(os.path.join(outdir, 'plot-selection.json'), 'w', encoding='utf-8') as stream:
+    json.dump(selection, stream, sort_keys=True)
+
 
 # Serialize the namespace: JSON-friendly values directly, DataFrames to CSV.
 results = {}

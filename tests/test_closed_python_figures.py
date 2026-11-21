@@ -39,9 +39,10 @@ fig.savefig('expected_second.png',dpi=120,bbox_inches='tight')
 plt.close('all')
 """)
         self.assertEqual(len(status['plots']),2)
-        for name,expected in zip(status['plots'],('expected_first.png','expected_second.png')):
-            self.assert_png(out/name)
-            self.assertEqual(hashlib.sha256((out/name).read_bytes()).digest(),hashlib.sha256((out/expected).read_bytes()).digest())
+        self.assertEqual(set(status['plots']),{'expected_first.png','expected_second.png'})
+        for capture,expected in zip(('automatic/plot_1.png','automatic/plot_2.png'),('expected_first.png','expected_second.png')):
+            self.assert_png(out/capture);self.assert_png(out/expected)
+            self.assertEqual(hashlib.sha256((out/capture).read_bytes()).digest(),hashlib.sha256((out/expected).read_bytes()).digest())
 
     def test_open_figure_still_captured_once(self):
         out,status=self.run_model("plt.plot([0,1],[0,signal])\n")
@@ -59,9 +60,9 @@ plt.figure('third');plt.plot([0,1],[0,signal]);plt.close('third')
         out,status=self.run_model("""fig,ax=plt.subplots();ax.plot([0,1],[0,signal]);plt.close(fig)
 with open('plot_1.png','wb') as stream:stream.write(b'explicit neutral model file')
 """)
-        self.assertEqual(len(status['plots']),1);self.assert_png(out/status['plots'][0])
-        self.assertEqual((out/'model-files/plot_1.png').read_bytes(),b'explicit neutral model file')
-        self.assertIn('model-files/plot_1.png',status['files'])
+        self.assert_png(out/'automatic/plot_1.png')
+        self.assertEqual((out/'plot_1.png').read_bytes(),b'explicit neutral model file')
+        self.assertIn('plot_1.png',status['files'])
 
     def test_partial_figure_survives_visualization_error(self):
         out,status=self.run_model("plt.plot([0,1],[0,signal]);plt.close();raise ValueError('neutral failure')\n")
