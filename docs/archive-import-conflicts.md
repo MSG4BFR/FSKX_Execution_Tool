@@ -52,6 +52,11 @@ an explicit user choice. Temporary uploaded files are cleaned up on success and
 failure. The UI displays the error and leaves the current workflow selected.
 
 Existing archive size, path, link and duplicate-entry checks apply in both modes.
+Export uses the same limits (`MAX_ARCHIVE_*` in `pipeline_store.py`), so an archive the tool
+writes can always be imported again; one over the limits fails at export with a clear message
+(HTTP 400 from the export endpoint) and leaves no temporary file. An import resolves and
+contains every target before it restores anything, so a failure in either policy leaves the
+destination unchanged.
 Reject mode additionally refuses distinct entries that resolve to the same target,
 so normalized path aliases cannot bypass preflight. Comparisons stream in 64 KiB
 chunks. This is a preflight for conflicts in a stable filesystem, not a transaction

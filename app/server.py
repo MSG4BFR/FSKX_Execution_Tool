@@ -857,9 +857,12 @@ def api_pipelines_export(pid):
             pipeline_store.save(rec.get("pipeline", {}), rec.get("name"), pid, node_state=live)
     except Exception:  # noqa: BLE001
         pass
-    res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR,
-                                       include_results=with_results,
-                                       results_root=engine.RESULTS_ROOT)
+    try:
+        res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR,
+                                           include_results=with_results,
+                                           results_root=engine.RESULTS_ROOT)
+    except ValueError as exc:
+        return jsonify({"error": f"Could not export: {exc}"}), 400
     if not res:
         abort(404)
     tmp, name = res

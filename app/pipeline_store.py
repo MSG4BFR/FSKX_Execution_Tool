@@ -46,6 +46,19 @@ ARCHIVE_EXT = ".fskxp"
 ARCHIVE_FORMAT = "fskx-pipeline"
 ARCHIVE_VERSION = "1.1.0"
 
+# Archive limits. Export and import share them, so an archive this tool writes can always be
+# read back by the same tool (a larger one fails at export with a clear message).
+MAX_ARCHIVE_ENTRIES = 4096
+MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_PIPELINE_JSON_BYTES = 1024 * 1024
+_GENERATED_ENTRIES = 3          # manifest.xml, metadata.rdf, manifest.json
+_GENERATED_BYTES = 1024 * 1024  # budget reserved for those three while exporting
+_LIMIT_MESSAGE = ("Pipeline archive exceeds the size limits (max {} files, {} MiB in total, "
+                  "{} MiB per file); export fewer results".format(
+                      MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_TOTAL_BYTES // 2**20,
+                      MAX_ARCHIVE_ENTRY_BYTES // 2**20))
+
 # COMBINE/OMEX format URIs (mirroring the convention real .fskx archives use).
 OMEX_FMT = "http://identifiers.org/combine.specifications/omex"
 OMEX_MANIFEST_FMT = "http://identifiers.org/combine.specifications/omex-manifest"
@@ -261,45 +274,74 @@ def build_archive(pid, models_dir=None, include_results=False, results_root=None
         return None
     models_dir = models_dir or MODELS_DIR
     results_root = results_root or RESULTS_ROOT
+    members = member_models(record)  # validate references before creating any file
+    pipeline_blob = json.dumps(record, indent=2)
+    if len(pipeline_blob.encode("utf-8")) > MAX_PIPELINE_JSON_BYTES:
+        raise ValueError("Pipeline definition exceeds 1 MiB")
+    totals = {"entries": 1 + _GENERATED_ENTRIES, "bytes": len(pipeline_blob) + _GENERATED_BYTES}
+
+    def account(path):
+        """Refuse early (before copying) anything the importer would later reject."""
+        size = os.path.getsize(path)
+        totals["entries"] += 1
+        totals["bytes"] += size
+        if (totals["entries"] > MAX_ARCHIVE_ENTRIES or size > MAX_ARCHIVE_ENTRY_BYTES
+                or totals["bytes"] > MAX_ARCHIVE_TOTAL_BYTES):
+            raise ValueError(_LIMIT_MESSAGE)
+
     fd, tmp = tempfile.mkstemp(suffix=ARCHIVE_EXT)
     os.close(fd)
-    members = member_models(record)
     missing = []
     embedded = []       # archive-relative locations of members actually written
     result_locs = []    # archive-relative locations of bundled result files
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(PIPELINE_JSON, json.dumps(record, indent=2))
-        for f in members:
-            src = _contained(models_dir, os.path.join(models_dir, f))
-            if os.path.exists(src):
-                z.write(src, "models/" + f)
-                embedded.append("./models/" + f)
-            else:
-                missing.append(f)
-        if include_results:
-            for base, rid in _node_runs(record):
-                run_path = _contained(results_root, os.path.join(results_root, base, rid))
-                if not os.path.isdir(run_path):
-                    continue
-                for dirpath, _dirs, fnames in os.walk(run_path):
-                    for fn in fnames:
-                        ap = _contained(results_root, os.path.join(dirpath, fn))
-                        rel = os.path.relpath(ap, results_root).replace(os.sep, "/")
-                        arc = "results/" + rel
-                        z.write(ap, arc)
-                        result_locs.append("./" + arc)
-        # OMEX manifest: master pipeline + each embedded member + bundled results + json manifest.
-        locations = (["./" + PIPELINE_JSON] + embedded + result_locs
-                     + ["./manifest.json", "./" + METADATA_RDF])
-        z.writestr(MANIFEST_XML, build_manifest_xml(locations, master="./" + PIPELINE_JSON))
-        z.writestr(METADATA_RDF, build_metadata_rdf(record))
-        # Legacy human-readable manifest (also registered above), kept for older readers.
-        z.writestr("manifest.json", json.dumps({
-            "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION,
-            "name": record["name"], "models": members,
-            "missing_models": missing,
-            "with_results": bool(include_results and result_locs),
-            "result_files": len(result_locs)}, indent=2))
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(PIPELINE_JSON, pipeline_blob)
+            for f in members:
+                src = _contained(models_dir, os.path.join(models_dir, f))
+                if os.path.exists(src):
+                    account(src)
+                    z.write(src, "models/" + f)
+                    embedded.append("./models/" + f)
+                else:
+                    missing.append(f)
+            if include_results:
+                for base, rid in _node_runs(record):
+                    run_path = _contained(results_root, os.path.join(results_root, base, rid))
+                    if not os.path.isdir(run_path):
+                        continue
+                    for dirpath, _dirs, fnames in os.walk(run_path):
+                        for fn in fnames:
+                            ap = _contained(results_root, os.path.join(dirpath, fn))
+                            rel = os.path.relpath(ap, results_root).replace(os.sep, "/")
+                            arc = "results/" + rel
+                            account(ap)
+                            z.write(ap, arc)
+                            result_locs.append("./" + arc)
+            # OMEX manifest: master pipeline + each embedded member + bundled results + json manifest.
+            locations = (["./" + PIPELINE_JSON] + embedded + result_locs
+                         + ["./manifest.json", "./" + METADATA_RDF])
+            z.writestr(MANIFEST_XML, build_manifest_xml(locations, master="./" + PIPELINE_JSON))
+            z.writestr(METADATA_RDF, build_metadata_rdf(record))
+            # Legacy human-readable manifest (also registered above), kept for older readers.
+            z.writestr("manifest.json", json.dumps({
+                "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION,
+                "name": record["name"], "models": members,
+                "missing_models": missing,
+                "with_results": bool(include_results and result_locs),
+                "result_files": len(result_locs)}, indent=2))
+        # Exact check on what was really written (the running totals above are an early abort).
+        with zipfile.ZipFile(tmp) as z:
+            sizes = [e.file_size for e in z.infolist()]
+        if (len(sizes) > MAX_ARCHIVE_ENTRIES or sum(sizes) > MAX_ARCHIVE_TOTAL_BYTES
+                or any(n > MAX_ARCHIVE_ENTRY_BYTES for n in sizes)):
+            raise ValueError(_LIMIT_MESSAGE)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     return tmp, record["name"]
 
 
@@ -418,21 +460,23 @@ def import_archive(path, models_dir=None, results_root=None, *, conflict_policy=
     results_root = results_root or RESULTS_ROOT
     with zipfile.ZipFile(path) as z:
         entries = z.infolist()
-        if (len(entries) > 4096 or len({e.filename for e in entries}) != len(entries)
-                or sum(e.file_size for e in entries) > 256*1024*1024
-                or any(e.file_size > 64*1024*1024 or stat.S_ISLNK(e.external_attr >> 16) for e in entries)):
+        if (len(entries) > MAX_ARCHIVE_ENTRIES or len({e.filename for e in entries}) != len(entries)
+                or sum(e.file_size for e in entries) > MAX_ARCHIVE_TOTAL_BYTES
+                or any(e.file_size > MAX_ARCHIVE_ENTRY_BYTES or stat.S_ISLNK(e.external_attr >> 16)
+                       for e in entries)):
             raise ValueError("Pipeline archive exceeds limits or contains duplicate/link entries")
         master = _master_location(z)
         names = set(z.namelist())
         if not (master and master in names):
             master = PIPELINE_JSON
-        if z.getinfo(master).file_size > 1024*1024:
+        if z.getinfo(master).file_size > MAX_PIPELINE_JSON_BYTES:
             raise ValueError("Pipeline definition exceeds 1 MiB")
         record = json.loads(z.read(master).decode("utf-8"))
         member_models(record)  # Validate references before restoring any files.
-        targets = _import_targets(z, models_dir, results_root)
+        # Resolve and contain every target first, in BOTH modes: a bad path then fails the whole
+        # import before anything is restored (a lazy generator failed halfway, leaving files).
+        targets = list(_import_targets(z, models_dir, results_root))
         if conflict_policy == "reject":
-            targets = list(targets)
             _check_import_conflicts(z, targets)
         os.makedirs(models_dir, exist_ok=True)
         for entry, target in targets:
