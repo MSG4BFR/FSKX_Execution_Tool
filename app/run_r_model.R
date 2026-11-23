@@ -83,6 +83,20 @@ result <- tryCatch({
   FALSE
 })
 
+# Keep helper functions in their own namespace rather than sourcing them into
+# model globals. The original shared-session model/visualization contract remains.
+.interchange_receipt <- list(files = list(), warnings = character())
+.interchange_helpers <- new.env(parent = baseenv())
+if (isTRUE(result) && !is.null(plan$serialize_params) && length(plan$serialize_params)) {
+  tryCatch({
+    source(file.path(runner_dir, "interchange_snapshot.R"), local = .interchange_helpers)
+    .interchange_receipt <- .interchange_helpers$capture_interchange(plan, .GlobalEnv, runner_dir, basename(outdir))
+    status$warnings <- c(status$warnings, .interchange_receipt$warnings)
+  }, error = function(e) {
+    status$warnings <<- c(status$warnings, paste("interchange unavailable:", conditionMessage(e)))
+  })
+}
+
 # Visualization is best-effort: a partial plot is still captured by the open device.
 if (isTRUE(result) && !is.null(viz_script) && nzchar(viz_script)) {
   tryCatch(run_one(viz_script, print_eval = TRUE), error = function(e) {
@@ -145,50 +159,12 @@ if (requireNamespace("jsonlite", quietly = TRUE)) {
              file.path(outdir, "results.json"))
 }
 
-# Emit the typed interchange bundle (model-joining Phase 1): the model's declared
-# parameters (INPUT/CONSTANT/OUTPUT, each tagged with classification), serialized in the
-# language-neutral format. Best-effort — failures become warnings, never a failed run.
-if (isTRUE(result) && !is.null(plan$serialize_params) && length(plan$serialize_params)) {
-  ic_ok <- tryCatch({ source(file.path(runner_dir, "interchange.R"), local = FALSE); TRUE },
-                    error = function(e) FALSE)
-  if (ic_ok) {
-    op <- plan$serialize_params  # jsonlite simplifies an array of objects to a data.frame
-    n_out <- if (is.data.frame(op)) nrow(op) else length(op)
-    params <- list()
-    for (i in seq_len(n_out)) {
-      if (is.data.frame(op)) {
-        pid <- as.character(op$id[i])
-        dt  <- if (!is.null(op$dataType)) as.character(op$dataType[i]) else ""
-        cls <- if (!is.null(op$classification)) as.character(op$classification[i]) else ""
-        nm  <- if (!is.null(op$name) && !is.na(op$name[i])) op$name[i] else NULL
-        un  <- if (!is.null(op$unit) && !is.na(op$unit[i])) op$unit[i] else NULL
-      } else {
-        row <- op[[i]]; pid <- row$id; dt <- row$dataType; cls <- row$classification
-        nm <- row$name; un <- row$unit
-      }
-      if (exists(pid, envir = .GlobalEnv, inherits = TRUE)) {
-        val <- tryCatch(get(pid, envir = .GlobalEnv, inherits = TRUE),
-                        error = function(e) NULL)
-        params[[length(params) + 1]] <- list(id = pid, dataType = dt, classification = cls,
-                                              name = nm, unit = un, value = val)
-      } else if (identical(toupper(cls), "OUTPUT")) {
-        status$warnings <- c(status$warnings,
-                             paste0("declared OUTPUT '", pid, "' not found; skipped"))
-      }
-    }
-    gen <- list(tool = "FSKX Runner",
-                modelId = if (!is.null(plan$model_id)) plan$model_id else "",
-                runId = basename(outdir))
-    wb <- tryCatch(ic_write_bundle(params, outdir, "R", gen),
-                   error = function(e) {
-                     status$warnings <<- c(status$warnings,
-                       paste("interchange bundle not written:", conditionMessage(e)))
-                     NULL
-                   })
-    if (!is.null(wb)) status$warnings <- c(status$warnings, wb$warnings)
-  } else {
-    status$warnings <- c(status$warnings, "interchange.R could not be sourced; outputs.json skipped")
-  }
+# Write the original serialized bytes after any model-created files are copied.
+if (length(.interchange_receipt$files)) {
+  tryCatch(.interchange_helpers$publish_interchange(.interchange_receipt, outdir),
+    error = function(e) {
+      status$warnings <<- c(status$warnings, paste("interchange bundle not written:", conditionMessage(e)))
+    })
 }
 
 if (requireNamespace("jsonlite", quietly = TRUE)) {
