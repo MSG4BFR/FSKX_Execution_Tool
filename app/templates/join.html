@@ -256,6 +256,12 @@
           <input type="file" accept=".fskxp,.zip" style="display:none" onchange="importPipeline(this)">
         </label>
       </div>
+      <div class="row-line" style="border-style:dashed">
+        <label style="display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="rejectImportConflicts"> Reject conflicting imports
+        </label>
+        <span class="hint">Stop if an existing model or result differs. Unchecked: keep local files and import the remaining files.</span>
+      </div>
       <div id="saveMsg" class="hint"></div>
       <details class="snapshots" style="margin-top:6px">
         <summary style="cursor:pointer;color:var(--muted);font-size:.9rem;user-select:none">
@@ -547,6 +553,7 @@ function importPipeline(input){
     return;
   }
   const fd = new FormData(); fd.append('file', f);
+  fd.append('conflict_policy', document.getElementById('rejectImportConflicts').checked ? 'reject' : 'keep_local');
   fetch('/api/pipelines/import',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
     input.value='';
     if(d.error){ flash('✕ '+d.error); return; }

@@ -857,9 +857,12 @@ def api_pipelines_export(pid):
             pipeline_store.save(rec.get("pipeline", {}), rec.get("name"), pid, node_state=live)
     except Exception:  # noqa: BLE001
         pass
-    res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR,
-                                       include_results=with_results,
-                                       results_root=engine.RESULTS_ROOT)
+    try:
+        res = pipeline_store.build_archive(pid, models_dir=engine.MODELS_DIR,
+                                           include_results=with_results,
+                                           results_root=engine.RESULTS_ROOT)
+    except ValueError as exc:
+        return jsonify({"error": f"Could not export: {exc}"}), 400
     if not res:
         abort(404)
     tmp, name = res
@@ -873,12 +876,18 @@ def api_pipelines_import():
     f = request.files.get("file")
     if not f:
         return jsonify({"error": "No file uploaded."}), 400
+    conflict_policy = request.form.get("conflict_policy", "keep_local")
+    if conflict_policy not in ("keep_local", "reject"):
+        return jsonify({"error": "conflict_policy must be 'keep_local' or 'reject'"}), 400
     fd, tmp = tempfile.mkstemp(suffix=pipeline_store.ARCHIVE_EXT)
     os.close(fd)
     f.save(tmp)
     try:
         rec = pipeline_store.import_archive(tmp, models_dir=engine.MODELS_DIR,
-                                            results_root=engine.RESULTS_ROOT)
+                                            results_root=engine.RESULTS_ROOT,
+                                            conflict_policy=conflict_policy)
+    except pipeline_store.ArchiveConflictError as exc:
+        return jsonify({"error": str(exc), "conflicts": exc.paths}), 409
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"Could not import: {exc}"}), 400
     finally:

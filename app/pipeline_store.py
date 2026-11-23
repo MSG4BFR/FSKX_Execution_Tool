@@ -25,6 +25,7 @@ Pure stdlib; no Flask/engine import, so it is unit-testable in isolation.
 """
 
 import json
+import stat
 import os
 import shutil
 import tempfile
@@ -44,6 +45,19 @@ RESULTS_ROOT = os.path.join(WORK_DIR, "_results")
 ARCHIVE_EXT = ".fskxp"
 ARCHIVE_FORMAT = "fskx-pipeline"
 ARCHIVE_VERSION = "1.1.0"
+
+# Archive limits. Export and import share them, so an archive this tool writes can always be
+# read back by the same tool (a larger one fails at export with a clear message).
+MAX_ARCHIVE_ENTRIES = 4096
+MAX_ARCHIVE_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_TOTAL_BYTES = 256 * 1024 * 1024
+MAX_PIPELINE_JSON_BYTES = 1024 * 1024
+_GENERATED_ENTRIES = 3          # manifest.xml, metadata.rdf, manifest.json
+_GENERATED_BYTES = 1024 * 1024  # budget reserved for those three while exporting
+_LIMIT_MESSAGE = ("Pipeline archive exceeds the size limits (max {} files, {} MiB in total, "
+                  "{} MiB per file); export fewer results".format(
+                      MAX_ARCHIVE_ENTRIES, MAX_ARCHIVE_TOTAL_BYTES // 2**20,
+                      MAX_ARCHIVE_ENTRY_BYTES // 2**20))
 
 # COMBINE/OMEX format URIs (mirroring the convention real .fskx archives use).
 OMEX_FMT = "http://identifiers.org/combine.specifications/omex"
@@ -206,7 +220,19 @@ def delete(pid):
 # ---------------------------------------------------------------------------
 
 def member_models(record):
-    return sorted({n["fskx"] for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")})
+    members = {n["fskx"] for n in record.get("pipeline", {}).get("nodes", []) if n.get("fskx")}
+    for name in members:
+        if (not isinstance(name, str) or not 5 < len(name) <= 255 or not name.lower().endswith('.fskx')
+                or any(c in name for c in '/\\:\x00') or any(ord(c) < 32 for c in name)):
+            raise ValueError("Pipeline model references must be bare FSKX filenames")
+    return sorted(members)
+
+
+def _contained(root, path):
+    root = os.path.realpath(root)
+    if os.path.commonpath([root, os.path.realpath(path)]) != root or os.path.islink(path):
+        raise ValueError("Pipeline archive path escapes its configured directory")
+    return path
 
 
 def _node_runs(record):
@@ -219,12 +245,18 @@ def _node_runs(record):
         rid, fskx = s.get("run_id"), fskx_of.get(nid)
         if not (rid and fskx):
             continue
+        if not pipeline_safe_run_id(rid):
+            raise ValueError("Invalid pipeline result reference")
         base = os.path.splitext(fskx)[0]
         if (base, rid) in seen:
             continue
         seen.add((base, rid))
         out.append((base, rid))
     return out
+
+
+def pipeline_safe_run_id(rid):
+    return isinstance(rid, str) and len(rid) <= 128 and safe_id(rid) and ':' not in rid
 
 
 def build_archive(pid, models_dir=None, include_results=False, results_root=None):
@@ -242,45 +274,74 @@ def build_archive(pid, models_dir=None, include_results=False, results_root=None
         return None
     models_dir = models_dir or MODELS_DIR
     results_root = results_root or RESULTS_ROOT
+    members = member_models(record)  # validate references before creating any file
+    pipeline_blob = json.dumps(record, indent=2)
+    if len(pipeline_blob.encode("utf-8")) > MAX_PIPELINE_JSON_BYTES:
+        raise ValueError("Pipeline definition exceeds 1 MiB")
+    totals = {"entries": 1 + _GENERATED_ENTRIES, "bytes": len(pipeline_blob) + _GENERATED_BYTES}
+
+    def account(path):
+        """Refuse early (before copying) anything the importer would later reject."""
+        size = os.path.getsize(path)
+        totals["entries"] += 1
+        totals["bytes"] += size
+        if (totals["entries"] > MAX_ARCHIVE_ENTRIES or size > MAX_ARCHIVE_ENTRY_BYTES
+                or totals["bytes"] > MAX_ARCHIVE_TOTAL_BYTES):
+            raise ValueError(_LIMIT_MESSAGE)
+
     fd, tmp = tempfile.mkstemp(suffix=ARCHIVE_EXT)
     os.close(fd)
-    members = member_models(record)
     missing = []
     embedded = []       # archive-relative locations of members actually written
     result_locs = []    # archive-relative locations of bundled result files
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr(PIPELINE_JSON, json.dumps(record, indent=2))
-        for f in members:
-            src = os.path.join(models_dir, f)
-            if os.path.exists(src):
-                z.write(src, "models/" + f)
-                embedded.append("./models/" + f)
-            else:
-                missing.append(f)
-        if include_results:
-            for base, rid in _node_runs(record):
-                run_path = os.path.join(results_root, base, rid)
-                if not os.path.isdir(run_path):
-                    continue
-                for dirpath, _dirs, fnames in os.walk(run_path):
-                    for fn in fnames:
-                        ap = os.path.join(dirpath, fn)
-                        rel = os.path.relpath(ap, results_root).replace(os.sep, "/")
-                        arc = "results/" + rel
-                        z.write(ap, arc)
-                        result_locs.append("./" + arc)
-        # OMEX manifest: master pipeline + each embedded member + bundled results + json manifest.
-        locations = (["./" + PIPELINE_JSON] + embedded + result_locs
-                     + ["./manifest.json", "./" + METADATA_RDF])
-        z.writestr(MANIFEST_XML, build_manifest_xml(locations, master="./" + PIPELINE_JSON))
-        z.writestr(METADATA_RDF, build_metadata_rdf(record))
-        # Legacy human-readable manifest (also registered above), kept for older readers.
-        z.writestr("manifest.json", json.dumps({
-            "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION,
-            "name": record["name"], "models": members,
-            "missing_models": missing,
-            "with_results": bool(include_results and result_locs),
-            "result_files": len(result_locs)}, indent=2))
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(PIPELINE_JSON, pipeline_blob)
+            for f in members:
+                src = _contained(models_dir, os.path.join(models_dir, f))
+                if os.path.exists(src):
+                    account(src)
+                    z.write(src, "models/" + f)
+                    embedded.append("./models/" + f)
+                else:
+                    missing.append(f)
+            if include_results:
+                for base, rid in _node_runs(record):
+                    run_path = _contained(results_root, os.path.join(results_root, base, rid))
+                    if not os.path.isdir(run_path):
+                        continue
+                    for dirpath, _dirs, fnames in os.walk(run_path):
+                        for fn in fnames:
+                            ap = _contained(results_root, os.path.join(dirpath, fn))
+                            rel = os.path.relpath(ap, results_root).replace(os.sep, "/")
+                            arc = "results/" + rel
+                            account(ap)
+                            z.write(ap, arc)
+                            result_locs.append("./" + arc)
+            # OMEX manifest: master pipeline + each embedded member + bundled results + json manifest.
+            locations = (["./" + PIPELINE_JSON] + embedded + result_locs
+                         + ["./manifest.json", "./" + METADATA_RDF])
+            z.writestr(MANIFEST_XML, build_manifest_xml(locations, master="./" + PIPELINE_JSON))
+            z.writestr(METADATA_RDF, build_metadata_rdf(record))
+            # Legacy human-readable manifest (also registered above), kept for older readers.
+            z.writestr("manifest.json", json.dumps({
+                "format": ARCHIVE_FORMAT, "version": ARCHIVE_VERSION,
+                "name": record["name"], "models": members,
+                "missing_models": missing,
+                "with_results": bool(include_results and result_locs),
+                "result_files": len(result_locs)}, indent=2))
+        # Exact check on what was really written (the running totals above are an early abort).
+        with zipfile.ZipFile(tmp) as z:
+            sizes = [e.file_size for e in z.infolist()]
+        if (len(sizes) > MAX_ARCHIVE_ENTRIES or sum(sizes) > MAX_ARCHIVE_TOTAL_BYTES
+                or any(n > MAX_ARCHIVE_ENTRY_BYTES for n in sizes)):
+            raise ValueError(_LIMIT_MESSAGE)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     return tmp, record["name"]
 
 
@@ -301,8 +362,10 @@ def _master_location(z):
 
 def _safe_rel(prefix, name):
     """The path under ``prefix`` for a zip entry, or None if it escapes (traversal/absolute)."""
-    rel = name[len(prefix):]
+    rel = name[len(prefix):].replace('\\', '/')
     if not rel or rel.endswith("/"):
+        return None
+    if ':' in rel or '\x00' in rel or '..' in rel.split('/'):
         return None
     norm = os.path.normpath(rel)
     if os.path.isabs(norm) or norm.startswith(".." + os.sep) or norm == "..":
@@ -310,7 +373,72 @@ def _safe_rel(prefix, name):
     return norm
 
 
-def import_archive(path, models_dir=None, results_root=None):
+class ArchiveConflictError(ValueError):
+    """An opt-in rejecting import found different local model/result contents."""
+
+    def __init__(self, paths):
+        self.paths = sorted(set(paths))
+        summary = ", ".join(self.paths[:5])
+        if len(self.paths) > 5:
+            summary += " (and {} more)".format(len(self.paths) - 5)
+        super().__init__("Import rejected: existing local files conflict with the archive: "
+                         + summary + ". Use another destination or resolve the conflicts first.")
+
+
+def _import_targets(archive, models_dir, results_root):
+    """Use the same entry selection and containment rules for preflight and copying."""
+    for entry in archive.infolist():
+        if entry.is_dir():
+            continue
+        name = entry.filename
+        if name.startswith("models/") and name.endswith(".fskx"):
+            base = os.path.basename(name)
+            if base and base == name[len("models/"):]:
+                yield entry, _contained(models_dir, os.path.join(models_dir, base))
+        elif name.startswith("results/"):
+            relative = _safe_rel("results/", name)
+            if relative:
+                yield entry, _contained(results_root, os.path.join(results_root, relative))
+
+
+def _same_contents(archive, entry, target):
+    if not os.path.isfile(target) or os.path.getsize(target) != entry.file_size:
+        return False
+    with archive.open(entry) as incoming, open(target, "rb") as local:
+        while True:
+            block = incoming.read(64 * 1024)
+            if block != local.read(64 * 1024):
+                return False
+            if not block:
+                return True
+
+
+def _check_import_conflicts(archive, targets):
+    conflicts, destinations = [], set()
+    for entry, target in targets:
+        key = os.path.normcase(os.path.realpath(target))
+        if key in destinations:
+            raise ValueError("Multiple archive entries resolve to the same import target: "
+                             + entry.filename)
+        destinations.add(key)
+        if os.path.exists(target):
+            if not _same_contents(archive, entry, target):
+                conflicts.append(entry.filename)
+        else:
+            # A file in place of a required parent directory also blocks this import.
+            parent = os.path.dirname(target)
+            while parent and not os.path.exists(parent):
+                ancestor = os.path.dirname(parent)
+                if ancestor == parent:
+                    break
+                parent = ancestor
+            if parent and not os.path.isdir(parent):
+                conflicts.append(entry.filename)
+    if conflicts:
+        raise ArchiveConflictError(conflicts)
+
+
+def import_archive(path, models_dir=None, results_root=None, *, conflict_policy="keep_local"):
     """Read a ``.fskxp`` archive: restore any member ``.fskx`` not already present, then save
     the pipeline as a NEW record (fresh id). Returns the saved record. Reads the OMEX
     ``manifest.xml`` to locate the master pipeline record when present, falling back to
@@ -319,35 +447,44 @@ def import_archive(path, models_dir=None, results_root=None):
     If the archive carries bundled run artifacts (``results/<base>/<run_id>/…`` — a *portable*
     export), they are restored into ``results_root`` so the saved node-state references resolve:
     the nodes recompute to *clean* and their results are viewable without re-running. Existing
-    local runs are never clobbered (an identical run id already present wins)."""
+    local files are never clobbered. ``conflict_policy="keep_local"`` (the default)
+    skips existing files even if their contents differ and still saves the new pipeline.
+    Opt in with ``conflict_policy="reject"`` to compare existing model/result files
+    byte-for-byte before copying anything. Identical files are accepted; differences
+    raise ``ArchiveConflictError`` with archive-relative ``paths``, without restoring
+    files or saving a pipeline. This preflight is not a transaction or a filesystem
+    lock: later I/O failures and concurrent changes are not rolled back."""
+    if not isinstance(conflict_policy, str) or conflict_policy not in ("keep_local", "reject"):
+        raise ValueError("conflict_policy must be 'keep_local' or 'reject'")
     models_dir = models_dir or MODELS_DIR
     results_root = results_root or RESULTS_ROOT
-    os.makedirs(models_dir, exist_ok=True)
     with zipfile.ZipFile(path) as z:
+        entries = z.infolist()
+        if (len(entries) > MAX_ARCHIVE_ENTRIES or len({e.filename for e in entries}) != len(entries)
+                or sum(e.file_size for e in entries) > MAX_ARCHIVE_TOTAL_BYTES
+                or any(e.file_size > MAX_ARCHIVE_ENTRY_BYTES or stat.S_ISLNK(e.external_attr >> 16)
+                       for e in entries)):
+            raise ValueError("Pipeline archive exceeds limits or contains duplicate/link entries")
         master = _master_location(z)
         names = set(z.namelist())
         if not (master and master in names):
             master = PIPELINE_JSON
+        if z.getinfo(master).file_size > MAX_PIPELINE_JSON_BYTES:
+            raise ValueError("Pipeline definition exceeds 1 MiB")
         record = json.loads(z.read(master).decode("utf-8"))
-        for n in z.namelist():
-            if n.startswith("models/") and n.endswith(".fskx"):
-                base = os.path.basename(n)
-                if not base or base != n[len("models/"):]:  # reject nested / traversal
-                    continue
-                target = os.path.join(models_dir, base)
-                if not os.path.exists(target):
-                    with z.open(n) as src, open(target, "wb") as dst:
-                        shutil.copyfileobj(src, dst)
-            elif n.startswith("results/"):
-                rel = _safe_rel("results/", n)
-                if not rel:
-                    continue
-                target = os.path.join(results_root, rel)
-                if os.path.exists(target):       # never clobber a local run's artifacts
-                    continue
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with z.open(n) as src, open(target, "wb") as dst:
-                    shutil.copyfileobj(src, dst)
+        member_models(record)  # Validate references before restoring any files.
+        # Resolve and contain every target first, in BOTH modes: a bad path then fails the whole
+        # import before anything is restored (a lazy generator failed halfway, leaving files).
+        targets = list(_import_targets(z, models_dir, results_root))
+        if conflict_policy == "reject":
+            _check_import_conflicts(z, targets)
+        os.makedirs(models_dir, exist_ok=True)
+        for entry, target in targets:
+            if os.path.exists(target):       # never clobber a local model or result
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with z.open(entry) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
     # Carry the embedded node-state (Phase C) into the new record. With a portable archive the
     # restored run folders make these references resolve → nodes show clean. Without results,
     # the missing runs degrade safely to "stale" and re-run (HANDOFF §2 "when in doubt, stale").
