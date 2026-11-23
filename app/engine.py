@@ -464,8 +464,9 @@ def classify_outputs(outdir):
         (r for r in rels if r.lower().endswith(IMAGE_EXTS) and r not in preferred),
         key=lambda n: (not os.path.basename(n).lower().startswith("plot_"), n.lower()),
     )
+    # status.json and the plot-selection receipt are internal bookkeeping, not downloads.
     files = [r for r in rels if (not r.lower().endswith(IMAGE_EXTS) or r in preferred)
-             and r != "status.json"]
+             and r not in ("status.json", "plot-selection.json")]
     return plots, files
 
 
