@@ -16,8 +16,10 @@ import hashlib
 import os
 import sys
 
-workdir = os.path.abspath(sys.argv[1])
-outdir = os.path.abspath(sys.argv[2])
+# Resolve symlinks once (macOS /var -> /private/var, symlinked mounts): relative save paths are
+# resolved through the real cwd, and the export tracking below compares path strings.
+workdir = os.path.realpath(sys.argv[1])
+outdir = os.path.realpath(sys.argv[2])
 os.makedirs(outdir, exist_ok=True)
 
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -134,8 +136,15 @@ collected_paths = {}
 IMAGE_EXTS = ('.png', '.svg', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf')
 
 
+def _resolved(path):
+    """Absolute path with symlinks in the parent directories resolved. A symlink as the
+    final component stays visible, so `_inside` can still refuse it."""
+    path = os.path.abspath(path)
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+
+
 def _inside(path, root):
-    path, root = os.path.abspath(path), os.path.abspath(root)
+    path, root = _resolved(path), os.path.realpath(root)
     if not path.startswith(root + os.sep):
         return False
     current = root
@@ -204,7 +213,7 @@ def _record_export(figure, destination, options, state):
     if expected == 'jpg': expected = 'jpeg'
     actual = extension.lstrip('.')
     if actual == 'jpg': actual = 'jpeg'
-    path = os.path.abspath(destination)
+    path = _resolved(destination)
     if (extension not in IMAGE_EXTS or actual != expected
             or not (_inside(path, workdir) or _inside(path, outdir))):
         return
@@ -273,7 +282,8 @@ if have_mpl:
 
     Figure.savefig = _save_with_export_record
 
-    def _close_with_capture(figure=None):
+    def _close_with_capture(fig=None):  # keep pyplot.close's parameter name (`fig=` callers)
+        figure = fig
         managers = Gcf.get_all_fig_managers()
         if isinstance(figure, str) and figure == "all":
             selected = managers
