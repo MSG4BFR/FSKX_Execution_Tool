@@ -134,9 +134,13 @@ except Exception as exc:  # noqa: BLE001
 # Freeze serialized values/sidecars while they still reflect the calculation.
 interchange_payloads = {}
 if status["ok"] and PLAN.get("serialize_params"):
-    from interchange_snapshot import capture
-    interchange_payloads, notes = capture(PLAN, ns, os.path.basename(outdir))
-    status["warnings"].extend(notes)
+    try:  # optional feature: a missing helper file must be a warning, never a failed run
+        from interchange_snapshot import capture
+        interchange_payloads, notes = capture(PLAN, ns, os.path.basename(outdir))
+        status["warnings"].extend(notes)
+    except Exception as exc:  # noqa: BLE001
+        status["warnings"].append("Interchange unavailable; original results preserved: "
+                                  + str(exc)[:500])
 
 # Visualization is best-effort: many older models target an older matplotlib API.
 # Even if it raises partway through, any figure already drawn is still captured below.
